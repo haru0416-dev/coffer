@@ -87,8 +87,9 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8788  # COFFER_PROXY_UPSTREAM defaults to ap
 cargo run --release -p coffer-mcp
 ```
 
-For agents that install MCP servers over npm, an npm launcher is provided — `npx coffer coffer-mcp`
-(or `npm i -g coffer`), which runs the prebuilt native binary for your platform. See [`npm/`](npm/).
+An npm launcher is scaffolded under [`npm/`](npm/): once published it will run the prebuilt native
+binary for your platform (`npx coffer coffer-mcp`). It is **not on the npm registry yet** — for now,
+build from source as above.
 
 Safe by default: the proxy refuses a non-loopback bind unless `COFFER_PROXY_ALLOW_PUBLIC=1` (it has no
 auth and replays your upstream key); the MCP `coffer_run` shell tool is disabled unless
