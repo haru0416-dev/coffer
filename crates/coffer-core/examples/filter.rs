@@ -4,11 +4,16 @@
 //!   cargo run -q -p coffer-core --example filter -- [reduction_frac]   < tool_output > compressed
 //!   cargo run -q -p coffer-core --example filter -- --structural-code [target_tokens] < source > outline
 //! reduction_frac defaults to 0.8 (aim to cut 80%).
+//!
+//! Set `COFFER_ROUNDTRIP_OUT=path` to also write the bytes that `reconstruct` returned, so a caller
+//! can prove `reconstruct(compress(x)) == x` against the original (e.g. `cmp original path`).
 
 use std::io::{Read, Write};
 
 use coffer_cas::MemoryCas;
 use coffer_core::{Budget, Compressor, compress_structural_code_to_budget, detect};
+#[cfg(feature = "tiktoken")]
+use coffer_tokenizer::TiktokenCounter;
 use coffer_tokenizer::{HeuristicCounter, TokenCounter};
 
 fn main() {
@@ -20,23 +25,34 @@ fn main() {
         .expect("read stdin");
 
     let cas = MemoryCas::new();
-    let counter = HeuristicCounter;
+    // The budget search probes its counter many times, so drive it with the FAST char-linear
+    // heuristic — compression stays quick even on megabytes (a real BPE tokenizer re-encodes the
+    // whole render on every probe, which is orders of magnitude slower). Headline token numbers are
+    // then counted ONCE with the model's real tokenizer (build with `--features tiktoken`), so the
+    // reported reduction is a real measurement rather than the chars/4 estimate the search used.
+    let search_counter = HeuristicCounter;
+    #[cfg(not(feature = "tiktoken"))]
+    let report_counter = HeuristicCounter;
+    #[cfg(feature = "tiktoken")]
+    let report_counter = TiktokenCounter::o200k();
     if matches!(
         first_arg.as_deref(),
         Some("--structural-code" | "structural_code")
     ) {
         let target_tokens = args.next().and_then(|s| s.parse().ok()).unwrap_or(1024);
-        let compact = compress_structural_code_to_budget(&input, &cas, target_tokens, &counter);
-        let reversible = compact
-            .reconstruct(&cas)
-            .map(|b| b == input)
-            .unwrap_or(false);
+        let compact =
+            compress_structural_code_to_budget(&input, &cas, target_tokens, &search_counter);
+        let recovered = compact.reconstruct(&cas);
+        let reversible = recovered.as_ref().map(|b| *b == input).unwrap_or(false);
+        if let Ok(bytes) = &recovered {
+            write_roundtrip(bytes);
+        }
         report_stats(
             "view=structural_code",
             &input,
             &compact.model_text,
             reversible,
-            &counter,
+            &report_counter,
         );
         std::io::stdout()
             .write_all(compact.model_text.as_bytes())
@@ -49,24 +65,36 @@ fn main() {
 
     let doc = Compressor::new()
         .budget(Budget::Reduction(frac))
-        .counter(&counter)
+        .counter(&search_counter)
         .min_bytes(0)
         .compress(&input, &cas)
         .expect("a counter is set");
 
     let rendered = doc.render_for_model();
-    let reversible = doc.reconstruct(&cas).map(|b| b == input).unwrap_or(false);
+    let recovered = doc.reconstruct(&cas);
+    let reversible = recovered.as_ref().map(|b| *b == input).unwrap_or(false);
+    if let Ok(bytes) = &recovered {
+        write_roundtrip(bytes);
+    }
 
     report_stats(
         &format!("type={content_type:?}"),
         &input,
         &rendered,
         reversible,
-        &counter,
+        &report_counter,
     );
     std::io::stdout()
         .write_all(rendered.as_bytes())
         .expect("write stdout");
+}
+
+/// For the demo / round-trip check: when `COFFER_ROUNDTRIP_OUT` is set, write the bytes that
+/// `reconstruct` returned to that path. Off by default, so normal runs are unchanged.
+fn write_roundtrip(bytes: &[u8]) {
+    if let Ok(path) = std::env::var("COFFER_ROUNDTRIP_OUT") {
+        std::fs::write(&path, bytes).expect("write COFFER_ROUNDTRIP_OUT");
+    }
 }
 
 fn report_stats(
@@ -85,8 +113,7 @@ fn report_stats(
     };
 
     eprintln!(
-        "{label}  raw_bytes={}  out_bytes={}  raw_tok={raw_tok}  out_tok={out_tok}  saved={saved:.1}%  reversible={reversible}",
-        input.len(),
-        rendered.len(),
+        "{label}  raw_tok={raw_tok}  out_tok={out_tok}  saved={saved:.1}%  tok={}  reversible={reversible}",
+        counter.model_label(),
     );
 }

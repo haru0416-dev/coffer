@@ -13,6 +13,11 @@ coffer-tokenizer = { path = "../coffer-tokenizer" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+# Count with the real OpenAI o200k_base tokenizer (instead of the chars/4 heuristic) — used by the
+# `filter` example so headline token numbers come from the model's own tokenizer, not an estimate.
+tiktoken = ["coffer-tokenizer/tiktoken"]
+
 [dev-dependencies]
 proptest = { workspace = true }
 
