@@ -1,0 +1,34 @@
+{
+  "name": "coffer",
+  "version": "0.0.0",
+  "description": "Byte-exact, reversible compression of LLM tool-output, with an exact compute-digest — an MCP server and a transparent HTTP proxy.",
+  "license": "Apache-2.0",
+  "bin": {
+    "coffer-mcp": "bin/coffer-mcp.js",
+    "coffer-proxy": "bin/coffer-proxy.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@coffer/linux-x64": "0.0.0",
+    "@coffer/linux-arm64": "0.0.0",
+    "@coffer/darwin-x64": "0.0.0",
+    "@coffer/darwin-arm64": "0.0.0",
+    "@coffer/win32-x64": "0.0.0"
+  },
+  "keywords": [
+    "llm",
+    "mcp",
+    "tool-output",
+    "compression",
+    "context",
+    "proxy",
+    "agent"
+  ]
+}

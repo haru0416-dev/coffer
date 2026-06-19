@@ -1,0 +1,12 @@
+data/*.json
+
+# build artifacts
+/target
+__pycache__/
+*.pyc
+
+# Claude Code session/worktree scratch
+.claude/
+
+# npm launcher
+node_modules/

@@ -1,0 +1,38 @@
+[package]
+name = "coffer-proxy"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Transparent-compression proxy: compress tool_result blocks in Anthropic Messages requests via coffer."
+
+[lib]
+name = "coffer_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "coffer-proxy"
+path = "src/main.rs"
+
+[dependencies]
+coffer-core = { path = "../coffer-core" }
+coffer-cas = { path = "../coffer-cas", features = ["sqlite"] }
+coffer-tokenizer = { path = "../coffer-tokenizer" }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync"] }
+reqwest = { workspace = true }
+anyhow = { workspace = true }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+futures-util = "0.3"
+bytes = "1"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "coffer-cas"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Content-addressed store with byte-faithful round-trip — the persistence half of coffer reversibility."
+
+[features]
+# Persistent SQLite backend. Off by default: the zero-dependency MemoryCas is
+# the default backend, and nothing pulls in rusqlite / the bundled C build unless enabled.
+sqlite = ["dep:rusqlite", "dep:tracing"]
+
+[dependencies]
+sha2 = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

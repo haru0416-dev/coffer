@@ -1,0 +1,70 @@
+# coffer — Cargo workspace.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/coffer-cas",
+    "crates/coffer-core",
+    "crates/coffer-tokenizer",
+    "crates/coffer-mcp",
+    "crates/coffer-proxy",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["coffer contributors"]
+
+[workspace.dependencies]
+# core / serialization (byte-faithful JSON is load-bearing for reversibility)
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value", "arbitrary_precision", "preserve_order"] }
+anyhow = "1"
+thiserror = "1"
+sha2 = "0.10"
+
+# persistent CAS backend — off by default behind coffer-cas's `sqlite` feature.
+# `bundled` vendors SQLite so no system library is needed (a C toolchain is, at build time).
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# async + http (direct provider calls for wire-level / cache-control parity)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+# tokenizer parity (OpenAI offline-exact; Claude/Gemini are API-counted in coffer-tokenizer)
+tiktoken-rs = "0.6"
+
+# type-aware code compression
+tree-sitter = "0.22"
+
+# CLI / observability
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+# Binaries install a stderr-only subscriber so coffer-cas durability/corruption warns reach operators
+#. Libraries stay subscriber-free; only the binary chooses the global subscriber.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# dev / testing
+proptest = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Baseline clippy gate for every member. The shipped engine crates (coffer-core / coffer-cas /
+# coffer-tokenizer) additionally opt into `clippy::pedantic` + `missing_docs` via a crate-level
+# attribute, with justified `allow`s at bounded-cast sites — the eval harness stays at this baseline.
+[workspace.lints.clippy]
+all = "warn"
+
+# Build the eval harness fast; keep a faithful, stripped release profile for the hot path.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+# Fail-open (coffer-proxy) and the CAS poison-recovery path rely on per-task/per-connection
+# unwinding: a panic on one bad input must unwind only that request task, never SIGABRT the whole
+# proxy/MCP process. Pinned explicitly (unwind is the default) so a future `panic = "abort"`
+# binary-size tweak is a conscious, reviewed decision — not a silent regression of the fail-open
+# guarantee.
+panic = "unwind"

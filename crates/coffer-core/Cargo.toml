@@ -1,0 +1,20 @@
+[package]
+name = "coffer-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Type-aware, reversible (CCR) compression of agent tool-output."
+
+[dependencies]
+coffer-cas = { path = "../coffer-cas" }
+coffer-tokenizer = { path = "../coffer-tokenizer" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
