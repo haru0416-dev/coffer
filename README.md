@@ -1,5 +1,9 @@
 # coffer
 
+[![ci](https://github.com/haru0416-dev/coffer/actions/workflows/ci.yml/badge.svg)](https://github.com/haru0416-dev/coffer/actions/workflows/ci.yml)
+[![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)
+
 > Byte-exact, **reversible** compression of LLM tool-output — plus an exact **compute-digest** that
 > answers questions over data too big to read back into the context window.
 
