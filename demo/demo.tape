@@ -9,7 +9,7 @@ Set FontSize 18
 Set Width 1200
 Set Height 600
 Set Padding 18
-Set Theme "Catppuccin Mocha"
+Set Theme "Dracula"
 Set TypingSpeed 38ms
 
 # --- setup (hidden so the gif isn't a compile log): sample data + prebuild ---
