@@ -5,10 +5,11 @@ A short terminal demo of coffer's reversible compression, recorded reproducibly 
 
 ## Render the GIF
 
+VHS needs `ttyd` and `ffmpeg`. Install it — `brew install vhs` (macOS),
+`sudo pacman -S vhs ttyd ffmpeg` (Arch), `apt install ffmpeg` + the VHS release binary (Debian/Ubuntu),
+or see <https://github.com/charmbracelet/vhs#installation>. Then, from the repository root:
+
 ```sh
-# 1. install VHS (it needs ttyd + ffmpeg). e.g. on macOS:
-brew install vhs
-# 2. from the repository root:
 vhs demo/demo.tape        # writes demo/demo.gif
 ```
 
