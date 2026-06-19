@@ -1,0 +1,47 @@
+name: Bug report
+description: Something in coffer behaves incorrectly (proxy, MCP server, or the engine).
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues** (the proxy replays your upstream API key and has no auth; the MCP
+        `coffer_run` shell tool) should be reported privately — see
+        [SECURITY.md](https://github.com/haru0416-dev/coffer/blob/main/SECURITY.md), not here.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - coffer-proxy (transparent HTTP proxy)
+        - coffer-mcp (MCP server)
+        - coffer-core (engine / compression)
+        - npm launcher
+        - other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Exact commands, config, and a minimal input. The smaller the input, the faster the fix.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: git commit, crate version, or npm version.
+  - type: checkboxes
+    id: reversibility
+    attributes:
+      label: Reversibility
+      description: coffer's core invariant is reconstruct(compress(x)) == x. Bytes coming back different from the original is the highest-severity class.
+      options:
+        - label: Recovered bytes differ from the original (a reversibility / data-loss issue)

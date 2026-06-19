@@ -1,0 +1,21 @@
+name: Feature request / idea
+description: Propose a capability or change.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does coffer fall short today? Concrete beats abstract.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed direction
+      description: Optional. What might a solution look like, and what trade-offs do you see?
+  - type: markdown
+    attributes:
+      value: |
+        coffer makes one hard promise: byte-exact reversibility never bends. Proposals that trade it
+        away for a smaller output are out of scope — see the README's "Honesty, up front".

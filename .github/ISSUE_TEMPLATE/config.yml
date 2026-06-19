@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report (private)
+    url: https://github.com/haru0416-dev/coffer/blob/main/SECURITY.md
+    about: The proxy replays your upstream API key and has no auth. Report vulnerabilities privately, never as a public issue.
+  - name: Question or discussion
+    url: https://github.com/haru0416-dev/coffer/discussions
+    about: Usage questions, ideas, and open-ended discussion.
