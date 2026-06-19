@@ -7,7 +7,7 @@ Output demo/demo.gif
 Set Shell "bash"
 Set FontSize 18
 Set Width 1200
-Set Height 600
+Set Height 340
 Set Padding 18
 Set Theme "Dracula"
 Set TypingSpeed 38ms

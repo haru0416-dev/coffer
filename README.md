@@ -7,6 +7,8 @@
 > Byte-exact, **reversible** compression of LLM tool-output — plus an exact **compute-digest** that
 > answers questions over data too big to read back into the context window.
 
+![coffer compressing a 5000-pod kubectl dump ~90%, still byte-for-byte reversible](demo/demo.gif)
+
 **Status: experimental.** The engine, the CAS-backed MCP server and transparent proxy, and the
 production smoke gates are real and tested. Two properties are mechanical and verifiable today —
 byte-exact recovery and exact aggregation. End-task *accuracy* claims (does compressing tool-output
