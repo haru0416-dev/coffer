@@ -141,8 +141,8 @@ reversibility.
 
 ## 6. Surfaces
 
-coffer exposes the engine two ways, over **one shared content store**, so a payload compressed on one side
-is recoverable on the other.
+coffer exposes the engine three ways, over **one shared content store**, so a payload compressed on one
+side is recoverable on the other.
 
 - **Transparent HTTP proxy.** Point an agent's base URL at it. It rewrites only the large tool-output
   values of each request — `tool_result` blocks (Anthropic Messages) and `*_call_output` items (OpenAI
@@ -181,6 +181,15 @@ is recoverable on the other.
   `coffer_ingest` (hold a file), `coffer_run` (capture a shell command's output server-side; disabled
   unless `COFFER_MCP_ENABLE_RUN=1`), `coffer_status` (diagnostics). Ingest and select return a content-free
   fact card (type, size, row count, field stats).
+- **MCP gateway (`coffer-wrap`).** Wraps any stdio MCP server as a child process (`coffer-wrap --
+  <command>`) and relays JSON-RPC with exactly two interventions, both fail-open: `tools/list` responses
+  gain a small set of injected query tools (collision-aware — a downstream tool with the same name is never
+  shadowed; the injected tool is renamed or skipped), and `tools/call` text content over a token threshold
+  (default 10k, the hosts' warning band) is stored byte-exact in the CAS and replaced with a fact card
+  carrying the handle. The injected tools answer describe/digest/aggregate/search/lines/retrieve against
+  the held bytes, so a result that would fail a host's output cap becomes a queryable handle instead.
+  `structuredContent` is never rewritten (it would violate the tool's declared `outputSchema`), and
+  `isError` results are never offloaded (a large error must stay visible).
 
 ## 7. Token accounting
 

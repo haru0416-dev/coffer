@@ -56,8 +56,13 @@ Two things make this more than a trimmer:
   `coffer_search`/`coffer_lines` (drill into
   logs), `coffer_rows`/`coffer_json`/`coffer_retrieve`/`coffer_unfold` (windowed JSON and bounded byte
   windows), and `coffer_ingest` (hold a file).
+- **MCP gateway.** Wrap any existing stdio MCP server (`coffer-wrap -- <command>`): oversized tool
+  results are offloaded byte-exact into the store and replaced with a fact card + handle, and the query
+  tools above are injected alongside the wrapped server's own (collision-safe — a downstream tool is
+  never shadowed). A result that would fail a host's output cap becomes a queryable handle instead.
 
-Both share one content store, so the proxy can compress and the MCP server can recover the same bytes.
+All three share one content store, so the proxy can compress, the gateway can offload, and the MCP
+server can recover the same bytes.
 
 ## Honesty, up front
 
@@ -129,8 +134,9 @@ auth and replays your upstream key); the MCP `coffer_run` shell tool is disabled
 ## Layout
 
 - `crates/` — the engine (`coffer-core`), content store (`coffer-cas`), tokenizer-parity counting
-  (`coffer-tokenizer`), MCP server (`coffer-mcp`), transparent proxy (`coffer-proxy`), and the
-  reproducible benchmark (`coffer-eval`, the table above — `cargo run --release -p coffer-eval`).
+  (`coffer-tokenizer`), MCP server (`coffer-mcp`), transparent proxy (`coffer-proxy`), MCP gateway
+  (`coffer-wrap`), and the reproducible benchmark (`coffer-eval`, the table above — `cargo run
+  --release -p coffer-eval`).
 - [`docs/DESIGN.md`](docs/DESIGN.md) — design & specification: the reversibility invariant, data model,
   compression pipeline, budget search, the compute-digest, surfaces, and non-goals.
 - [`docs/deployment.md`](docs/deployment.md) — MCP/proxy deployment, shared-CAS wiring, and limits.

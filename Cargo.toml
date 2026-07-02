@@ -9,6 +9,7 @@ members = [
     "crates/coffer-mcp",
     "crates/coffer-proxy",
     "crates/coffer-eval",
+    "crates/coffer-wrap",
 ]
 
 [workspace.package]
