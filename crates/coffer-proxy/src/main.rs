@@ -351,8 +351,10 @@ async fn main() -> anyhow::Result<()> {
     // A connect_timeout converts the dominant slow/unreachable-upstream failure (a black-holed
     // upstream that accepts the socket but never responds) into the existing 502 path, instead of
     // a request that awaits forever holding the inbound connection task and its buffered body.
-    // Deliberately NO total `.timeout()`: in reqwest 0.12 it bounds the whole response-body read
-    // and would abort legitimate long-lived SSE streams.
+    // Deliberately NO total `.timeout()`: it bounds the whole request through the end of the
+    // response-body read (unchanged through reqwest 0.13) and would abort legitimate long-lived SSE
+    // streams. `read_timeout` (a per-read idle bound, split out since 0.12.4) is intentionally unset
+    // too — the connect_timeout above is the only bound we want.
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()?;

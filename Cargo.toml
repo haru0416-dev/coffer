@@ -21,8 +21,8 @@ authors = ["coffer contributors"]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "arbitrary_precision", "preserve_order"] }
 anyhow = "1"
-thiserror = "1"
-sha2 = "0.10"
+thiserror = "2"
+sha2 = "0.11"
 
 # persistent CAS backend — off by default behind coffer-cas's `sqlite` feature.
 # `bundled` vendors SQLite so no system library is needed (a C toolchain is, at build time).
@@ -30,13 +30,16 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 
 # async + http (direct provider calls for wire-level / cache-control parity)
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# reqwest 0.13 renamed the rustls feature (`rustls-tls` -> `rustls`) and moved its crypto provider
+# default from ring to aws-lc-rs. We keep rustls (not native-tls) to stay off the system OpenSSL.
+# 0.13.x also dropped the `webpki-roots` / `rustls-native-certs` Cargo features: with `rustls`, the
+# client now trusts the platform/OS certificate store via rustls-platform-verifier (under 0.12's
+# `rustls-tls` it was bundled Mozilla webpki roots). Hosts running this proxy already ship CA certs;
+# for an OS-independent roots-only build, inject roots via the builder instead.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 
 # tokenizer parity (OpenAI offline-exact; Claude/Gemini are API-counted in coffer-tokenizer)
-tiktoken-rs = "0.6"
-
-# type-aware code compression
-tree-sitter = "0.22"
+tiktoken-rs = "0.12"
 
 # CLI / observability
 clap = { version = "4", features = ["derive", "env"] }

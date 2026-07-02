@@ -139,4 +139,30 @@ mod tests {
             );
         }
     }
+
+    // o200k_base is a fixed, published vocabulary, so these counts are stable across tiktoken-rs
+    // versions. The anchors lock coffer's headline property — byte-exact OpenAI token parity — so a
+    // future tokenizer bump that silently shifts counts (e.g. a merge-algorithm change) fails here
+    // instead of corrupting budget matching. Counts were taken from the o200k_base encoder itself.
+    #[cfg(feature = "tiktoken")]
+    #[test]
+    fn tiktoken_o200k_parity_anchors() {
+        let c = TiktokenCounter::o200k();
+        assert_eq!(c.model_label(), "openai-o200k_base");
+        assert_eq!(c.count(""), 0, "empty input must be zero tokens");
+
+        for (text, expected) in [
+            ("hello world", 2usize),
+            (r#"{"name":"coffer","count":42}"#, 10),
+            ("the quick brown fox jumps over the lazy dog", 9),
+        ] {
+            assert_eq!(
+                c.count(text),
+                expected,
+                "o200k_base count drift for {text:?}"
+            );
+            // Encoding is deterministic: the same input always yields the same count.
+            assert_eq!(c.count(text), c.count(text));
+        }
+    }
 }
