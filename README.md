@@ -59,7 +59,8 @@ Two things make this more than a trimmer:
 - **MCP gateway.** Wrap any existing stdio MCP server (`coffer-wrap -- <command>`): oversized tool
   results are offloaded byte-exact into the store and replaced with a fact card + handle, and the query
   tools above are injected alongside the wrapped server's own (collision-safe — a downstream tool is
-  never shadowed). A result that would fail a host's output cap becomes a queryable handle instead.
+  never shadowed). A result that would fail a host's output cap becomes a queryable handle instead
+  ([30-second demo](demo/wrap.gif)).
 
 All three share one content store, so the proxy can compress, the gateway can offload, and the MCP
 server can recover the same bytes.

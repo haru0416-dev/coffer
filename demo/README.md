@@ -40,3 +40,35 @@ cmp pods.json back.json                                                # exits 0
 token counts use the real `o200k_base` tokenizer, so `saved` is a measurement, not the knob echoed back.
 
 The GIF is embedded at the top of the [main README](../README.md) via `![coffer demo](demo/demo.gif)`.
+
+## coffer-wrap demo (`wrap.gif`)
+
+The second gif shows the MCP gateway: a server whose `get_pods` returns 20,000 pods as ONE
+~1.1 MB tool result (≈ 269k estimated tokens — far past the ~25k-token caps MCP hosts put on
+tool output). Wrapped with `coffer-wrap`, the model receives a ~1 KB fact card instead; the
+injected tools then answer exactly over ALL rows: `coffer_digest` finds the needle buried in
+the elided middle (`pod-010000`, restarts=99999), `coffer_aggregate` counts the 2,000 Error
+pods with row-index provenance, and `coffer_retrieve` pages the original back out —
+`sha256(bytes) == handle`, byte-identical to what the server produced.
+
+It is recorded without a terminal recorder at all: `demo/wrap/record.py` runs the real
+commands (real binary, real MCP JSON-RPC, real output — only the typing cadence is
+synthetic) and writes an [asciicast](https://docs.asciinema.org/manual/asciicast/v2/), which
+[agg](https://github.com/asciinema/agg) renders to a gif:
+
+```sh
+cargo build --release -p coffer-wrap
+python3 demo/wrap/record.py                                  # runs the demo, writes demo/wrap.cast
+agg --theme dracula --font-size 16 demo/wrap.cast demo/wrap.gif
+```
+
+What the driver subcommands actually do (`demo/wrap/wrap_demo.py` is presentation sugar over
+real MCP calls; state persists between invocations through the shared SQLite CAS, which is
+itself the deployment story):
+
+```sh
+python3 wrap_demo.py get_pods    # tools/call through coffer-wrap → prints the fact card
+python3 wrap_demo.py ask …       # coffer_digest: exact NL stats over all rows
+python3 wrap_demo.py errors      # coffer_aggregate: exact count + provenance indices
+python3 wrap_demo.py verify      # coffer_retrieve pages + sha256 == handle + byte compare
+```
