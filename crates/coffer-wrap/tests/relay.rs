@@ -255,7 +255,21 @@ async fn large_result_offloads_and_round_trips_byte_exact() {
     );
     assert!(text.contains("provenance"), "{text}");
 
-    // 4. describe sees the schema.
+    // 4. rows fetches specific rows verbatim (the row-read path a fact card points to).
+    let resp = client
+        .call_tool(
+            "coffer_rows",
+            json!({"handle": handle, "start": 2999, "limit": 1}),
+        )
+        .await;
+    let text = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert_eq!(resp.pointer("/result/isError"), Some(&json!(false)));
+    assert!(text.contains("pod-2999"), "{text}");
+
+    // 5. describe sees the schema.
     let resp = client
         .call_tool("coffer_describe", json!({"handle": handle}))
         .await;

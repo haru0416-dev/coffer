@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use coffer_cas::{Cas, ContentHash, MemoryCas, SqliteCas};
 use coffer_core::dataset::DatasetCache;
-use coffer_core::{Agg, Op, Predicate};
+use coffer_core::{Agg, Op, Predicate, pick_rows};
 use coffer_tokenizer::{HeuristicCounter, TokenCounter};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -126,15 +126,17 @@ enum ToolKind {
     Describe,
     Digest,
     Aggregate,
+    Rows,
     Search,
     Lines,
     Retrieve,
 }
 
-const BASE_TOOLS: [(ToolKind, &str); 6] = [
+const BASE_TOOLS: [(ToolKind, &str); 7] = [
     (ToolKind::Describe, "describe"),
     (ToolKind::Digest, "digest"),
     (ToolKind::Aggregate, "aggregate"),
+    (ToolKind::Rows, "rows"),
     (ToolKind::Search, "search"),
     (ToolKind::Lines, "lines"),
     (ToolKind::Retrieve, "retrieve"),
@@ -195,11 +197,14 @@ impl RelayState {
         format!(
             "Query it without loading it into context: {digest}(handle, query) for \
              natural-language exact stats; {aggregate}(handle, where, agg, field) for filtered \
-             exact aggregation with row provenance; {search}(handle, pattern) to find lines; \
+             exact aggregation with row provenance; {rows}(handle, start, limit) to fetch \
+             specific JSON rows verbatim (feed it an index from aggregate's provenance); \
+             {search}(handle, pattern) to find lines; \
              {lines}(handle, start, end) to page lines; {retrieve}(handle, start, len) for raw \
              bytes; {describe}(handle) for schema and field stats.",
             digest = self.name_of(ToolKind::Digest),
             aggregate = self.name_of(ToolKind::Aggregate),
+            rows = self.name_of(ToolKind::Rows),
             search = self.name_of(ToolKind::Search),
             lines = self.name_of(ToolKind::Lines),
             retrieve = self.name_of(ToolKind::Retrieve),
@@ -467,6 +472,19 @@ fn tool_def(kind: ToolKind, name: &str) -> Value {
                 "required": ["handle", "agg"]
             }
         }),
+        ToolKind::Rows => json!({
+            "name": name,
+            "description": "Fetch specific rows of an offloaded JSON-array result VERBATIM (byte-exact copies). Use an index from aggregate's provenance, or page with start/limit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "handle": handle_prop,
+                    "start": {"type": "integer", "description": "0-based row index to start at."},
+                    "limit": {"type": "integer", "description": "Rows to return (default 10, max 50)."}
+                },
+                "required": ["handle", "start"]
+            }
+        }),
         ToolKind::Search => json!({
             "name": name,
             "description": "Case-insensitive substring search over the lines of an offloaded result; returns matching line numbers and text.",
@@ -646,7 +664,8 @@ fn handle_injected(kind: ToolKind, args: &Value, state: &RelayState) -> Value {
         ToolKind::Describe => handle_describe(state, handle, &bytes),
         ToolKind::Digest => handle_digest(state, handle, &bytes, args),
         ToolKind::Aggregate => handle_aggregate(state, handle, &bytes, args),
-        ToolKind::Search => handle_search(&bytes, args),
+        ToolKind::Rows => handle_rows(state, handle, &bytes, args),
+        ToolKind::Search => handle_search(state, handle, &bytes, args),
         ToolKind::Lines => handle_lines(&bytes, args),
         ToolKind::Retrieve => handle_retrieve(&bytes, args, &state.cfg),
     }
@@ -809,7 +828,39 @@ fn handle_aggregate(state: &RelayState, handle: &str, bytes: &[u8], args: &Value
     }
 }
 
-fn handle_search(bytes: &[u8], args: &Value) -> Value {
+fn handle_rows(state: &RelayState, handle: &str, bytes: &[u8], args: &Value) -> Value {
+    let Some(start) = args.get("start").and_then(Value::as_u64) else {
+        return error_result("missing required argument: start (0-based row index)");
+    };
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(10, |v| (v as usize).clamp(1, 50));
+    // Row count via the cached dataset (parse-once); the bytes themselves are copied
+    // verbatim from the original by pick_rows, so what comes back is byte-auditable.
+    let Some(ds) = state.datasets.get_or_parse(handle, bytes) else {
+        return error_result("not a JSON array of records — use lines/retrieve for text");
+    };
+    let total = ds.len();
+    let start = start as usize;
+    if start >= total {
+        return error_result(&format!(
+            "start {start} is past the last row ({total} rows)"
+        ));
+    }
+    let end = (start + limit).min(total);
+    let indices: Vec<usize> = (start..end).collect();
+    match pick_rows(bytes, &indices) {
+        Some(rows_bytes) => ok_result(format!(
+            "rows {start}..{} of {total} (verbatim):\n{}",
+            end - 1,
+            String::from_utf8_lossy(&rows_bytes)
+        )),
+        None => error_result("row extraction refused (scanner/parser disagreement)"),
+    }
+}
+
+fn handle_search(state: &RelayState, handle: &str, bytes: &[u8], args: &Value) -> Value {
     let Some(pattern) = args.get("pattern").and_then(Value::as_str) else {
         return error_result("missing required argument: pattern");
     };
@@ -818,6 +869,30 @@ fn handle_search(bytes: &[u8], args: &Value) -> Value {
         .and_then(Value::as_u64)
         .map_or(50, |v| (v as usize).clamp(1, 500));
     let needle = pattern.to_lowercase();
+
+    // JSON arrays are usually ONE physical line, which makes a line search a trap (it
+    // matches "line 1" and shows the head of the file). Search rows instead: return the
+    // matching row indices — which feed straight into rows(handle, start) — and the rows.
+    if let Some(ds) = state.datasets.get_or_parse(handle, bytes) {
+        let mut shown = Vec::new();
+        let mut total = 0usize;
+        for (i, row) in ds.rows().iter().enumerate() {
+            let text = row.to_string();
+            if text.to_lowercase().contains(&needle) {
+                total += 1;
+                if shown.len() < max_matches {
+                    shown.push(format!("row {i}: {}", clip_chars(&text, 240)));
+                }
+            }
+        }
+        return ok_result(format!(
+            "{total} matching row(s) for {pattern:?}; showing {}:\n{}\n(fetch any row verbatim with {}(handle, start=<row index>))",
+            shown.len(),
+            shown.join("\n"),
+            state.name_of(ToolKind::Rows),
+        ));
+    }
+
     let text = String::from_utf8_lossy(bytes);
     let mut shown = Vec::new();
     let mut total = 0usize;

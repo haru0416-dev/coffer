@@ -195,8 +195,11 @@ side is recoverable on the other.
   gain a small set of injected query tools (collision-aware — a downstream tool with the same name is never
   shadowed; the injected tool is renamed or skipped), and `tools/call` text content over a token threshold
   (default 10k, the hosts' warning band) is stored byte-exact in the CAS and replaced with a fact card
-  carrying the handle. The injected tools answer describe/digest/aggregate/search/lines/retrieve against
-  the held bytes, so a result that would fail a host's output cap becomes a queryable handle instead.
+  carrying the handle. The injected tools answer describe/digest/aggregate/rows/search/lines/retrieve
+  against the held bytes — search is row-aware on JSON arrays (a single-line array would otherwise make a
+  line search a trap: it matches "line 1" and shows the head of the file) and its matches feed straight
+  into `rows` for verbatim fetches — so a result that would fail a host's output cap becomes a queryable
+  handle instead.
   `structuredContent` is never rewritten (it would violate the tool's declared `outputSchema`), and
   `isError` results are never offloaded (a large error must stay visible).
 

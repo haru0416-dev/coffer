@@ -155,6 +155,12 @@ impl Dataset {
         self.rows.len()
     }
 
+    /// Read-only view of the parsed records (for row-wise scans by surfaces).
+    #[must_use]
+    pub fn rows(&self) -> &[Value] {
+        &self.rows
+    }
+
     /// Whether the array is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
