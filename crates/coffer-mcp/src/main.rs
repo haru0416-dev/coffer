@@ -9,7 +9,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use coffer_cas::{Cas, ContentHash, SqliteCas, SqliteConfig};
+use coffer_cas::{Cas, ContentHash, SqliteCas, SqliteConfig, create_private_dir_all};
 use coffer_core::dataset::DatasetCache;
 use coffer_core::{
     Agg, ContentType, Dataset, Op, Predicate, compress_json_where,
@@ -103,29 +103,16 @@ impl Coffer {
         if let Some(parent) = path.parent() {
             create_private_dir_all(parent)?;
         }
-        let soft_cap_bytes = sqlite_soft_cap_bytes_from_env();
-        let resident_cap_bytes = sqlite_resident_cap_bytes_from_env();
-        let warm_bytes_on_open = sqlite_warm_bytes_on_open_from_env();
-        let trust_hashes_on_open = sqlite_trust_hashes_on_open_from_env();
-        let checkpoint_every_blobs = sqlite_checkpoint_every_blobs_from_env();
+        let cfg = SqliteConfig::from_env();
         Ok(Self {
             store: Arc::new(HandleStore::Sqlite {
                 path: path.to_path_buf(),
-                cas: Box::new(SqliteCas::open_with_config(
-                    path,
-                    &SqliteConfig {
-                        soft_cap_bytes,
-                        warm_bytes_on_open,
-                        trust_hashes_on_open,
-                        resident_cap_bytes,
-                        checkpoint_every_blobs,
-                    },
-                )?),
-                soft_cap_bytes,
-                warm_bytes_on_open,
-                trust_hashes_on_open,
-                resident_cap_bytes,
-                checkpoint_every_blobs,
+                cas: Box::new(SqliteCas::open_with_config(path, &cfg)?),
+                soft_cap_bytes: cfg.soft_cap_bytes,
+                warm_bytes_on_open: cfg.warm_bytes_on_open,
+                trust_hashes_on_open: cfg.trust_hashes_on_open,
+                resident_cap_bytes: cfg.resident_cap_bytes,
+                checkpoint_every_blobs: cfg.checkpoint_every_blobs,
             }),
             datasets: Arc::new(DatasetCache::new(dataset_cache_entries_from_env())),
         })
@@ -231,16 +218,6 @@ impl Coffer {
     }
 }
 
-fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
 impl Cas for Coffer {
     fn put(&self, bytes: &[u8]) -> ContentHash {
         self.put_bytes(bytes)
@@ -253,60 +230,6 @@ impl Cas for Coffer {
     fn len(&self) -> usize {
         self.handle_count()
     }
-}
-
-fn sqlite_soft_cap_bytes_from_env() -> Option<usize> {
-    let raw = std::env::var("COFFER_CAS_SOFT_CAP_MB").ok();
-    sqlite_soft_cap_bytes_from_value(raw.as_deref())
-}
-
-fn sqlite_soft_cap_bytes_from_value(raw: Option<&str>) -> Option<usize> {
-    let mb = raw?.trim().parse::<usize>().ok()?;
-    (mb > 0).then(|| mb.saturating_mul(1024 * 1024))
-}
-
-fn sqlite_resident_cap_bytes_from_env() -> Option<usize> {
-    let raw = std::env::var("COFFER_CAS_RESIDENT_CAP_MB").ok();
-    sqlite_resident_cap_bytes_from_value(raw.as_deref())
-}
-
-fn sqlite_resident_cap_bytes_from_value(raw: Option<&str>) -> Option<usize> {
-    let mb = raw?.trim().parse::<usize>().ok()?;
-    (mb > 0).then(|| mb.saturating_mul(1024 * 1024))
-}
-
-fn sqlite_warm_bytes_on_open_from_env() -> bool {
-    let raw = std::env::var("COFFER_CAS_WARM_BYTES_ON_OPEN").ok();
-    sqlite_warm_bytes_on_open_from_value(raw.as_deref())
-}
-
-fn sqlite_warm_bytes_on_open_from_value(raw: Option<&str>) -> bool {
-    matches!(
-        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
-
-fn sqlite_trust_hashes_on_open_from_env() -> bool {
-    let raw = std::env::var("COFFER_CAS_TRUST_HASHES_ON_OPEN").ok();
-    sqlite_trust_hashes_on_open_from_value(raw.as_deref())
-}
-
-fn sqlite_trust_hashes_on_open_from_value(raw: Option<&str>) -> bool {
-    matches!(
-        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
-
-fn sqlite_checkpoint_every_blobs_from_env() -> Option<usize> {
-    let raw = std::env::var("COFFER_CAS_CHECKPOINT_EVERY").ok();
-    sqlite_checkpoint_every_blobs_from_value(raw.as_deref())
-}
-
-fn sqlite_checkpoint_every_blobs_from_value(raw: Option<&str>) -> Option<usize> {
-    let every = raw?.trim().parse::<usize>().ok()?;
-    (every > 0).then_some(every)
 }
 
 fn retrieve_limits_from_env() -> RetrieveLimits {
@@ -2896,80 +2819,6 @@ impl Widget {
         assert!(status.contains("persisted_blobs_this_run: 1"), "{status}");
         assert!(status.contains("retrieve_default_bytes:"), "{status}");
         assert!(status.contains("retrieve_max_bytes:"), "{status}");
-    }
-
-    #[test]
-    fn sqlite_soft_cap_parser_uses_mebibytes_and_ignores_zero_or_bad_values() {
-        assert_eq!(
-            super::sqlite_soft_cap_bytes_from_value(Some("2")),
-            Some(2 * 1024 * 1024)
-        );
-        assert_eq!(super::sqlite_soft_cap_bytes_from_value(Some("0")), None);
-        assert_eq!(super::sqlite_soft_cap_bytes_from_value(Some("bad")), None);
-        assert_eq!(super::sqlite_soft_cap_bytes_from_value(None), None);
-    }
-
-    #[test]
-    fn sqlite_resident_cap_parser_uses_mebibytes_and_ignores_zero_or_bad_values() {
-        assert_eq!(
-            super::sqlite_resident_cap_bytes_from_value(Some("2")),
-            Some(2 * 1024 * 1024)
-        );
-        assert_eq!(
-            super::sqlite_resident_cap_bytes_from_value(Some(" 3 ")),
-            Some(3 * 1024 * 1024)
-        );
-        assert_eq!(super::sqlite_resident_cap_bytes_from_value(Some("0")), None);
-        assert_eq!(
-            super::sqlite_resident_cap_bytes_from_value(Some("bad")),
-            None
-        );
-        assert_eq!(super::sqlite_resident_cap_bytes_from_value(None), None);
-    }
-
-    #[test]
-    fn sqlite_warm_bytes_parser_accepts_common_true_values_only() {
-        assert!(super::sqlite_warm_bytes_on_open_from_value(Some("1")));
-        assert!(super::sqlite_warm_bytes_on_open_from_value(Some("true")));
-        assert!(super::sqlite_warm_bytes_on_open_from_value(Some(" YES ")));
-        assert!(super::sqlite_warm_bytes_on_open_from_value(Some("on")));
-        assert!(!super::sqlite_warm_bytes_on_open_from_value(Some("0")));
-        assert!(!super::sqlite_warm_bytes_on_open_from_value(Some("false")));
-        assert!(!super::sqlite_warm_bytes_on_open_from_value(None));
-    }
-
-    #[test]
-    fn sqlite_trust_hashes_parser_accepts_common_true_values_only() {
-        assert!(super::sqlite_trust_hashes_on_open_from_value(Some("1")));
-        assert!(super::sqlite_trust_hashes_on_open_from_value(Some("true")));
-        assert!(super::sqlite_trust_hashes_on_open_from_value(Some(" YES ")));
-        assert!(super::sqlite_trust_hashes_on_open_from_value(Some("on")));
-        assert!(!super::sqlite_trust_hashes_on_open_from_value(Some("0")));
-        assert!(!super::sqlite_trust_hashes_on_open_from_value(Some(
-            "false"
-        )));
-        assert!(!super::sqlite_trust_hashes_on_open_from_value(None));
-    }
-
-    #[test]
-    fn sqlite_checkpoint_every_parser_uses_positive_blob_count_only() {
-        assert_eq!(
-            super::sqlite_checkpoint_every_blobs_from_value(Some("1")),
-            Some(1)
-        );
-        assert_eq!(
-            super::sqlite_checkpoint_every_blobs_from_value(Some(" 25 ")),
-            Some(25)
-        );
-        assert_eq!(
-            super::sqlite_checkpoint_every_blobs_from_value(Some("0")),
-            None
-        );
-        assert_eq!(
-            super::sqlite_checkpoint_every_blobs_from_value(Some("bad")),
-            None
-        );
-        assert_eq!(super::sqlite_checkpoint_every_blobs_from_value(None), None);
     }
 
     #[test]

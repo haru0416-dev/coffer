@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "sqlite")]
 mod sqlite;
 #[cfg(feature = "sqlite")]
-pub use sqlite::{SqliteCas, SqliteConfig, SqliteDiskUsage, read_blob};
+pub use sqlite::{SqliteCas, SqliteConfig, SqliteDiskUsage, create_private_dir_all, read_blob};
 
 /// A content hash: the hex-encoded SHA-256 of the stored bytes.
 ///

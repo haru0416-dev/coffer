@@ -27,11 +27,15 @@ fn build_store() -> Result<HandleStore, String> {
             if let Some(parent) = std::path::Path::new(&path).parent()
                 && !parent.as_os_str().is_empty()
             {
-                std::fs::create_dir_all(parent)
+                coffer_cas::create_private_dir_all(parent)
                     .map_err(|e| format!("create {}: {e}", parent.display()))?;
             }
-            let cas = coffer_cas::SqliteCas::open(&path)
-                .map_err(|e| format!("open SQLite CAS at {path}: {e}"))?;
+            // Honor the same COFFER_CAS_* tuning as the proxy and the MCP server.
+            let cas = coffer_cas::SqliteCas::open_with_config(
+                &path,
+                &coffer_cas::SqliteConfig::from_env(),
+            )
+            .map_err(|e| format!("open SQLite CAS at {path}: {e}"))?;
             tracing::info!(%path, "using shared SQLite CAS");
             Ok(HandleStore::Sqlite(Box::new(cas)))
         }

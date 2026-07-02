@@ -25,12 +25,12 @@
 //! dropped connection.
 
 use std::convert::Infallible;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use coffer_cas::{Cas, MemoryCas, SqliteCas, SqliteConfig};
+use coffer_cas::{Cas, MemoryCas, SqliteCas, SqliteConfig, create_private_dir_all};
 use coffer_proxy::{
     RewriteOptions, TransformKind, compress_ollama_body_kind, compress_request_body_kind,
     compress_responses_body_kind,
@@ -349,13 +349,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("coffer-proxy: persisting offloads to shared CAS at {path}");
             Store::Sqlite(Box::new(SqliteCas::open_with_config(
                 &path,
-                &SqliteConfig {
-                    soft_cap_bytes: sqlite_soft_cap_bytes_from_env(),
-                    warm_bytes_on_open: sqlite_warm_bytes_on_open_from_env(),
-                    trust_hashes_on_open: sqlite_trust_hashes_on_open_from_env(),
-                    resident_cap_bytes: sqlite_resident_cap_bytes_from_env(),
-                    checkpoint_every_blobs: sqlite_checkpoint_every_blobs_from_env(),
-                },
+                &SqliteConfig::from_env(),
             )?))
         }
         Err(_) => Store::Memory(MemoryCas::new()),
@@ -446,16 +440,6 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-}
-
-fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }
 
 type ProxyBody = BoxBody<Bytes, std::io::Error>;
@@ -867,60 +851,6 @@ fn max_concurrent_from_env(max_body_bytes: usize) -> usize {
 fn default_max_concurrent(max_body_bytes: usize) -> usize {
     let body_mb = max_body_bytes.div_ceil(MIB).max(1);
     (DEFAULT_CONCURRENCY_BUDGET_MB / body_mb).clamp(1, 256)
-}
-
-fn sqlite_soft_cap_bytes_from_env() -> Option<usize> {
-    let raw = std::env::var("COFFER_CAS_SOFT_CAP_MB").ok();
-    sqlite_soft_cap_bytes_from_value(raw.as_deref())
-}
-
-fn sqlite_soft_cap_bytes_from_value(raw: Option<&str>) -> Option<usize> {
-    let mb = raw?.trim().parse::<usize>().ok()?;
-    (mb > 0).then(|| mb.saturating_mul(1024 * 1024))
-}
-
-fn sqlite_resident_cap_bytes_from_env() -> Option<usize> {
-    let raw = std::env::var("COFFER_CAS_RESIDENT_CAP_MB").ok();
-    sqlite_resident_cap_bytes_from_value(raw.as_deref())
-}
-
-fn sqlite_resident_cap_bytes_from_value(raw: Option<&str>) -> Option<usize> {
-    let mb = raw?.trim().parse::<usize>().ok()?;
-    (mb > 0).then(|| mb.saturating_mul(1024 * 1024))
-}
-
-fn sqlite_warm_bytes_on_open_from_env() -> bool {
-    let raw = std::env::var("COFFER_CAS_WARM_BYTES_ON_OPEN").ok();
-    sqlite_warm_bytes_on_open_from_value(raw.as_deref())
-}
-
-fn sqlite_warm_bytes_on_open_from_value(raw: Option<&str>) -> bool {
-    matches!(
-        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
-
-fn sqlite_trust_hashes_on_open_from_env() -> bool {
-    let raw = std::env::var("COFFER_CAS_TRUST_HASHES_ON_OPEN").ok();
-    sqlite_trust_hashes_on_open_from_value(raw.as_deref())
-}
-
-fn sqlite_trust_hashes_on_open_from_value(raw: Option<&str>) -> bool {
-    matches!(
-        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
-
-fn sqlite_checkpoint_every_blobs_from_env() -> Option<usize> {
-    let raw = std::env::var("COFFER_CAS_CHECKPOINT_EVERY").ok();
-    sqlite_checkpoint_every_blobs_from_value(raw.as_deref())
-}
-
-fn sqlite_checkpoint_every_blobs_from_value(raw: Option<&str>) -> Option<usize> {
-    let every = raw?.trim().parse::<usize>().ok()?;
-    (every > 0).then_some(every)
 }
 
 /// Apply a tool-output transform, flush offloads for cross-process unfold, and (under
@@ -1561,83 +1491,5 @@ mod tests {
             super::capture_path_slug("/openai/v1/responses?x=1"),
             "openai_v1_responses_x_1"
         );
-    }
-
-    #[test]
-    fn sqlite_soft_cap_parser_uses_mebibytes_and_ignores_zero_or_bad_values() {
-        assert_eq!(
-            super::sqlite_soft_cap_bytes_from_value(Some("2")),
-            Some(2 * 1024 * 1024)
-        );
-        assert_eq!(
-            super::sqlite_soft_cap_bytes_from_value(Some(" 3 ")),
-            Some(3 * 1024 * 1024)
-        );
-        assert_eq!(super::sqlite_soft_cap_bytes_from_value(Some("0")), None);
-        assert_eq!(super::sqlite_soft_cap_bytes_from_value(Some("bad")), None);
-        assert_eq!(super::sqlite_soft_cap_bytes_from_value(None), None);
-    }
-
-    #[test]
-    fn sqlite_resident_cap_parser_uses_mebibytes_and_ignores_zero_or_bad_values() {
-        assert_eq!(
-            super::sqlite_resident_cap_bytes_from_value(Some("2")),
-            Some(2 * 1024 * 1024)
-        );
-        assert_eq!(
-            super::sqlite_resident_cap_bytes_from_value(Some(" 3 ")),
-            Some(3 * 1024 * 1024)
-        );
-        assert_eq!(super::sqlite_resident_cap_bytes_from_value(Some("0")), None);
-        assert_eq!(
-            super::sqlite_resident_cap_bytes_from_value(Some("bad")),
-            None
-        );
-        assert_eq!(super::sqlite_resident_cap_bytes_from_value(None), None);
-    }
-
-    #[test]
-    fn sqlite_warm_bytes_parser_accepts_common_true_values_only() {
-        assert!(super::sqlite_warm_bytes_on_open_from_value(Some("1")));
-        assert!(super::sqlite_warm_bytes_on_open_from_value(Some("true")));
-        assert!(super::sqlite_warm_bytes_on_open_from_value(Some(" YES ")));
-        assert!(super::sqlite_warm_bytes_on_open_from_value(Some("on")));
-        assert!(!super::sqlite_warm_bytes_on_open_from_value(Some("0")));
-        assert!(!super::sqlite_warm_bytes_on_open_from_value(Some("false")));
-        assert!(!super::sqlite_warm_bytes_on_open_from_value(None));
-    }
-
-    #[test]
-    fn sqlite_trust_hashes_parser_accepts_common_true_values_only() {
-        assert!(super::sqlite_trust_hashes_on_open_from_value(Some("1")));
-        assert!(super::sqlite_trust_hashes_on_open_from_value(Some("true")));
-        assert!(super::sqlite_trust_hashes_on_open_from_value(Some(" YES ")));
-        assert!(super::sqlite_trust_hashes_on_open_from_value(Some("on")));
-        assert!(!super::sqlite_trust_hashes_on_open_from_value(Some("0")));
-        assert!(!super::sqlite_trust_hashes_on_open_from_value(Some(
-            "false"
-        )));
-        assert!(!super::sqlite_trust_hashes_on_open_from_value(None));
-    }
-
-    #[test]
-    fn sqlite_checkpoint_every_parser_uses_positive_blob_count_only() {
-        assert_eq!(
-            super::sqlite_checkpoint_every_blobs_from_value(Some("1")),
-            Some(1)
-        );
-        assert_eq!(
-            super::sqlite_checkpoint_every_blobs_from_value(Some(" 25 ")),
-            Some(25)
-        );
-        assert_eq!(
-            super::sqlite_checkpoint_every_blobs_from_value(Some("0")),
-            None
-        );
-        assert_eq!(
-            super::sqlite_checkpoint_every_blobs_from_value(Some("bad")),
-            None
-        );
-        assert_eq!(super::sqlite_checkpoint_every_blobs_from_value(None), None);
     }
 }

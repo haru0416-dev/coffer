@@ -182,6 +182,77 @@ enum WriteOp {
     Flush(Sender<()>),
 }
 
+impl SqliteConfig {
+    /// Build from the `COFFER_CAS_*` environment variables — the single definition the
+    /// binaries (proxy / MCP / wrap) share, so the knobs cannot drift between surfaces:
+    /// `COFFER_CAS_SOFT_CAP_MB`, `COFFER_CAS_RESIDENT_CAP_MB` (MiB, `0`/junk disables),
+    /// `COFFER_CAS_WARM_BYTES_ON_OPEN`, `COFFER_CAS_TRUST_HASHES_ON_OPEN`
+    /// (`1`/`true`/`yes`/`on`), `COFFER_CAS_CHECKPOINT_EVERY` (positive blob count).
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_values(
+            std::env::var("COFFER_CAS_SOFT_CAP_MB").ok().as_deref(),
+            std::env::var("COFFER_CAS_RESIDENT_CAP_MB").ok().as_deref(),
+            std::env::var("COFFER_CAS_WARM_BYTES_ON_OPEN")
+                .ok()
+                .as_deref(),
+            std::env::var("COFFER_CAS_TRUST_HASHES_ON_OPEN")
+                .ok()
+                .as_deref(),
+            std::env::var("COFFER_CAS_CHECKPOINT_EVERY").ok().as_deref(),
+        )
+    }
+
+    /// [`SqliteConfig::from_env`] with the raw values injected — the testable seam.
+    #[must_use]
+    pub fn from_values(
+        soft_cap_mb: Option<&str>,
+        resident_cap_mb: Option<&str>,
+        warm_bytes_on_open: Option<&str>,
+        trust_hashes_on_open: Option<&str>,
+        checkpoint_every: Option<&str>,
+    ) -> Self {
+        fn mebibytes(raw: Option<&str>) -> Option<usize> {
+            let mb = raw?.trim().parse::<usize>().ok()?;
+            (mb > 0).then(|| mb.saturating_mul(1024 * 1024))
+        }
+        fn truthy(raw: Option<&str>) -> bool {
+            matches!(
+                raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+                Some("1" | "true" | "yes" | "on")
+            )
+        }
+        fn positive(raw: Option<&str>) -> Option<usize> {
+            let v = raw?.trim().parse::<usize>().ok()?;
+            (v > 0).then_some(v)
+        }
+        Self {
+            soft_cap_bytes: mebibytes(soft_cap_mb),
+            warm_bytes_on_open: truthy(warm_bytes_on_open),
+            trust_hashes_on_open: truthy(trust_hashes_on_open),
+            resident_cap_bytes: mebibytes(resident_cap_mb),
+            checkpoint_every_blobs: positive(checkpoint_every),
+        }
+    }
+}
+
+/// Create `path` (and parents) with owner-only permissions (`0o700` on unix) — the shape
+/// every binary wants for the directory holding a `COFFER_CAS_DB` (the store carries raw
+/// offloaded bytes, which may include anything a tool ever printed).
+///
+/// # Errors
+///
+/// Propagates the underlying directory-creation or permission-set failure.
+pub fn create_private_dir_all(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// A byte-faithful CAS that persists to `SQLite` while keeping a lazy resident cache.
 ///
 /// See the module-level documentation for the durability model. Construct with
@@ -847,6 +918,35 @@ impl std::fmt::Debug for SqliteCas {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn config_from_values_parses_mebibytes_bools_and_counts() {
+        let cfg = SqliteConfig::from_values(
+            Some("512"),
+            Some("0"),
+            Some(" TRUE "),
+            Some("off"),
+            Some("1000"),
+        );
+        assert_eq!(cfg.soft_cap_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(cfg.resident_cap_bytes, None, "zero disables");
+        assert!(
+            cfg.warm_bytes_on_open,
+            "truthy values are trimmed + case-folded"
+        );
+        assert!(!cfg.trust_hashes_on_open, "only 1/true/yes/on enable");
+        assert_eq!(cfg.checkpoint_every_blobs, Some(1000));
+    }
+
+    #[test]
+    fn config_from_values_ignores_junk() {
+        let cfg = SqliteConfig::from_values(Some("lots"), Some("-3"), Some("2"), None, Some("0"));
+        assert_eq!(cfg.soft_cap_bytes, None);
+        assert_eq!(cfg.resident_cap_bytes, None);
+        assert!(!cfg.warm_bytes_on_open);
+        assert!(!cfg.trust_hashes_on_open);
+        assert_eq!(cfg.checkpoint_every_blobs, None);
+    }
+
     use super::*;
 
     /// A unique temp directory that is removed when dropped, so each test gets an isolated DB.
