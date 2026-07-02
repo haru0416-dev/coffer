@@ -166,7 +166,17 @@ is recoverable on the other.
   conjunction of predicates and hold the matches as a **new handle**, so an agent narrows a dataset in
   composable steps entirely server-side), `coffer_pick` (pull the rows at explicit indices — e.g. a
   digest's provenance — as a new handle, so an exact aggregate can be audited by re-fetching and recounting
-  its backing rows), `coffer_search` / `coffer_lines` (drill into logs), `coffer_rows`
+  its backing rows), `coffer_bucket` (a numeric bucketing histogram — `agg` per `floor(value / width)`
+  band, §5), `coffer_window` (a windowed log histogram — case-insensitive matches per N-line block, §5),
+  `coffer_join` (the two-dataset semi-join / project-join group-by of §5 — aggregate the left rows whose
+  join key has a qualifying match in the right, optionally grouped by a right attribute),
+  `coffer_check_claim` (recompute a claimed number over the held bytes and answer AGREE/DISAGREE with the
+  matched row indices — a lie detector for agent-reported aggregates), `coffer_receipt` /
+  `coffer_verify_receipt` (issue and later re-execute a portable exactness receipt — the typed query, the
+  value, the backing row indices, and SHA-256 over the backing rows and the input — with verdicts
+  `VALID` / `VALUE_MISMATCH` / `BACKING_TAMPERED` / `REFUSED` / `MALFORMED_RECEIPT`; verification is pure
+  re-derivation, no model or network),
+  `coffer_search` / `coffer_lines` (drill into logs), `coffer_rows`
   / `coffer_json` (windowed JSON), `coffer_retrieve` / `coffer_unfold` (bounded byte windows),
   `coffer_ingest` (hold a file), `coffer_run` (capture a shell command's output server-side; disabled
   unless `COFFER_MCP_ENABLE_RUN=1`), `coffer_status` (diagnostics). Ingest and select return a content-free

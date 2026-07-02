@@ -47,9 +47,15 @@ Two things make this more than a trimmer:
   and `coffer_aggregate` (exact aggregates from a plain-English ask or a typed `count|sum|mean|min|max`
   over a predicate, returned with the indices of the rows behind the number), `coffer_query` and
   `coffer_select` (keep the matching rows, or hand back a new handle to narrow again), `coffer_pick`
-  (pull specific rows back to re-check a number), `coffer_search`/`coffer_lines` (drill into logs),
-  `coffer_rows`/`coffer_json`/`coffer_retrieve`/`coffer_unfold` (windowed JSON and bounded byte windows),
-  and `coffer_ingest` (hold a file).
+  (pull specific rows back to re-check a number), `coffer_bucket`/`coffer_window` (an exact numeric-band
+  or per-block-of-lines histogram), `coffer_join` (correlate two held datasets — "sum order.amount for
+  orders whose customer is gold-tier" — entirely server-side), `coffer_check_claim` (recompute a number an
+  agent claims against the held bytes — AGREE/DISAGREE, with the backing rows), `coffer_receipt`/
+  `coffer_verify_receipt` (issue a portable, re-executable exactness receipt for an aggregate and verify
+  one later with no model in the loop — a runnable demo is `cargo run -p coffer-core --example verify`),
+  `coffer_search`/`coffer_lines` (drill into
+  logs), `coffer_rows`/`coffer_json`/`coffer_retrieve`/`coffer_unfold` (windowed JSON and bounded byte
+  windows), and `coffer_ingest` (hold a file).
 
 Both share one content store, so the proxy can compress and the MCP server can recover the same bytes.
 

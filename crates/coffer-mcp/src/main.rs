@@ -870,6 +870,43 @@ fn parse_agg(agg: &str, field: Option<&str>) -> Option<Agg> {
     }
 }
 
+/// Format a numeric aggregate value: a whole number prints without a fractional part (so a `count`
+/// reads `42`), anything else keeps full precision (so a `mean` reads `12.3456`).
+fn fmt_group_value(v: f64) -> String {
+    if v.is_finite() && v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{v:.0}")
+    } else {
+        format!("{v}")
+    }
+}
+
+/// Render a [`coffer_core::GroupAggregate`] (numeric bucketing, windowed log histogram, or
+/// project-join group-by) as model-facing text: the one-line summary, then one line per group with
+/// its value and its backing-row count (provenance), capped so a pathological group count cannot
+/// flood the context.
+fn group_aggregate_text(g: &coffer_core::GroupAggregate) -> String {
+    use std::fmt::Write as _;
+    const SHOWN: usize = 64;
+    let mut s = String::new();
+    let _ = writeln!(s, "{}", g.display);
+    for b in g.groups.iter().take(SHOWN) {
+        let _ = writeln!(
+            s,
+            "  {} → {} ({} rows)",
+            b.key,
+            fmt_group_value(b.value),
+            b.matched.len()
+        );
+    }
+    if g.groups.len() > SHOWN {
+        let _ = writeln!(s, "  … ({} groups total)", g.groups.len());
+    }
+    s.push_str(
+        "Computed over ALL rows including offloaded ones; each group lists its backing-row count.",
+    );
+    s
+}
+
 fn ingested_text(handle: &str, bytes: &[u8]) -> String {
     let card = fact_card(bytes)
         .map(|c| format!("\n{c}"))
@@ -878,7 +915,9 @@ fn ingested_text(handle: &str, bytes: &[u8]) -> String {
         "handle: {handle}\nsummary: {}\nbytes: {}{card}\n\nThe full output is held server-side and is NOT in your context. \
          Use coffer_digest(handle, query) for EXACT aggregates over ALL of it (count/sum/mean/median/percentile/\
          group-by/argmax/filter-aggregate), coffer_query(handle, field, op, value) to keep only matching rows, \
-         coffer_select(handle, where) to filter by a conjunction and get the matches as a new handle to narrow again, or \
+         coffer_select(handle, where) to filter by a conjunction and get the matches as a new handle to narrow again, \
+         coffer_bucket(handle, field, width) for a numeric-band histogram and coffer_window(handle, pattern, window) for a per-block log histogram, \
+         coffer_join(left, right, left_key, right_key, agg) to correlate two handles exactly, or \
          coffer_search(handle, pattern) / coffer_lines(handle, start_line, end_line) for logs/text, \
          coffer_json(handle, path) / coffer_rows(handle, start, limit) / coffer_retrieve(handle, start, max_bytes) for a small window; \
          set full=true only for small payloads you truly need raw, subject to the configured hard cap.",
@@ -1178,6 +1217,263 @@ impl Coffer {
         }
     }
 
+    #[tool(
+        description = "Exact NUMERIC BUCKETING histogram over a held JSON array: group rows into \
+        fixed-width bands by floor(value / width) on a numeric field, then aggregate each band. \
+        field = the numeric field to bucket on; width = the band width (> 0); agg = count|sum|mean|min|max \
+        (value_field required for all but count), computed WITHIN each band. Bands are ordered by lower \
+        bound and computed over ALL rows including offloaded ones — e.g. \"count per 100ms latency band\" \
+        is bucket(field=latency_ms, width=100). Refuses (no guess) when width <= 0, the handle is not a \
+        JSON array, or the aggregated field is present-but-non-numeric. handle may be a full handle or a \
+        unique <<cof:HASH>> sentinel prefix."
+    )]
+    async fn coffer_bucket(
+        &self,
+        Parameters(a): Parameters<BucketArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(bytes) = self.get_handle(&a.handle) else {
+            return Ok(unknown_handle());
+        };
+        let agg_name = a.agg.as_deref().unwrap_or("count");
+        let Some(agg) = parse_agg(agg_name, a.value_field.as_deref()) else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "agg must be count|sum|mean|min|max, and sum/mean/min/max require value_field",
+            )]));
+        };
+        match coffer_core::bucket_aggregate(&bytes, &a.field, a.width, &agg) {
+            Some(g) => Ok(CallToolResult::success(vec![Content::text(
+                group_aggregate_text(&g),
+            )])),
+            None => Ok(CallToolResult::error(vec![Content::text(
+                "no exact histogram: width must be > 0, the handle must be a JSON array, and the bucket/value field must be numeric",
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "Windowed LOG HISTOGRAM over a held text/log handle: count case-insensitive \
+        substring matches of pattern per block of `window` lines, so you can see WHERE an event \
+        clusters across a long log without reading it. Returns one row per block (0-based block index) \
+        with the match count and the matching 1-based line numbers as provenance — e.g. \"ERROR lines \
+        per 1000-line block\" is window(pattern=ERROR, window=1000). Refuses when window = 0 or pattern \
+        is empty. handle may be a full handle or a unique <<cof:HASH>> sentinel prefix."
+    )]
+    async fn coffer_window(
+        &self,
+        Parameters(a): Parameters<WindowArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(bytes) = self.get_handle(&a.handle) else {
+            return Ok(unknown_handle());
+        };
+        match coffer_core::count_matches_per_window(&bytes, &a.pattern, a.window) {
+            Some(g) => Ok(CallToolResult::success(vec![Content::text(
+                group_aggregate_text(&g),
+            )])),
+            None => Ok(CallToolResult::error(vec![Content::text(
+                "no histogram: window must be >= 1 and pattern must be non-empty",
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "Exact correlation across TWO held JSON arrays without pulling either into your \
+        context. SEMI-JOIN: aggregate the LEFT array over rows whose left_key has a matching right_key \
+        in the RIGHT array. left/right = the two handles; left_key/right_key = the equi-join fields; \
+        agg = count|sum|mean|min|max (field required for all but count) over the qualifying LEFT rows; \
+        right_where = optional conjunctive filter on the RIGHT rows. Example: \"sum order.amount for \
+        orders whose customer is gold-tier\" = join(left=orders, right=customers, left_key=customer_id, \
+        right_key=id, agg=sum, field=amount, right_where=[{field:tier, op:eq, value:gold}]). Set group_by \
+        to a RIGHT field for a PROJECT-JOIN group-by instead (\"revenue by customer.region\"); it refuses \
+        rather than guessing when a join key maps to conflicting group values, and ignores right_where. A \
+        duplicated join key never double-counts a left row. Each handle may be a full handle or a unique \
+        <<cof:HASH>> sentinel prefix."
+    )]
+    async fn coffer_join(
+        &self,
+        Parameters(a): Parameters<JoinArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (Some(left), Some(right)) = (self.get_handle(&a.left), self.get_handle(&a.right))
+        else {
+            return Ok(unknown_handle());
+        };
+        let agg_name = a.agg.as_deref().unwrap_or("count");
+        let Some(agg) = parse_agg(agg_name, a.field.as_deref()) else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "agg must be count|sum|mean|min|max, and sum/mean/min/max require a field",
+            )]));
+        };
+        if let Some(group_field) = a.group_by.as_deref().filter(|g| !g.is_empty()) {
+            return match coffer_core::join_group_aggregate(
+                &left,
+                &right,
+                &a.left_key,
+                &a.right_key,
+                group_field,
+                &agg,
+            ) {
+                Some(g) => Ok(CallToolResult::success(vec![Content::text(
+                    group_aggregate_text(&g),
+                )])),
+                None => Ok(CallToolResult::error(vec![Content::text(
+                    "no exact project-join: both handles must be JSON arrays, the aggregated field numeric, and no join key may map to conflicting group values",
+                )])),
+            };
+        }
+        let right_where = predicates_from_args(&a.right_where);
+        match coffer_core::join_aggregate(
+            &left,
+            &right,
+            &a.left_key,
+            &a.right_key,
+            &right_where,
+            &agg,
+        ) {
+            Some(r) => {
+                const SHOWN: usize = 64;
+                let idx = if r.matched.len() <= SHOWN {
+                    format!("{:?}", r.matched)
+                } else {
+                    let head: Vec<usize> = r.matched.iter().take(SHOWN).copied().collect();
+                    format!("{head:?} … ({} total)", r.matched.len())
+                };
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "{}\njoined LEFT row indices: {idx}\nFetch them with coffer_pick(left_handle, indices) to re-verify.",
+                    r.display
+                ))]))
+            }
+            None => Ok(CallToolResult::error(vec![Content::text(
+                "no exact semi-join: both handles must be JSON arrays and the aggregated field numeric",
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "Check an agent's CLAIMED number against the held bytes: recompute the exact \
+        aggregate (agg = count|sum|mean|min|max over the `where` predicate conjunction, field required \
+        for all but count) and compare it to `expected`. Returns AGREE or DISAGREE with the exact value \
+        and the backing row indices, so a number a model asserted can be confirmed or caught WITHOUT \
+        trusting the model's arithmetic — computed over ALL rows including offloaded ones. Use it as a \
+        lie-detector for tool-output: when an agent says 'there are 200 errors', check whether the held \
+        data agrees. handle may be a full handle or a unique <<cof:HASH>> sentinel prefix."
+    )]
+    async fn coffer_check_claim(
+        &self,
+        Parameters(a): Parameters<CheckClaimArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(bytes) = self.get_handle(&a.handle) else {
+            return Ok(unknown_handle());
+        };
+        let Some(agg) = parse_agg(&a.agg, a.field.as_deref()) else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "agg must be count|sum|mean|min|max, and sum/mean/min/max require a field",
+            )]));
+        };
+        let predicates = predicates_from_args(&a.predicates);
+        match query_aggregate(&bytes, &predicates, &agg) {
+            Some(r) => {
+                let agree = (r.value - a.expected).abs() <= 1e-9 + 1e-9 * r.value.abs();
+                const SHOWN: usize = 64;
+                let idx = if r.matched.len() <= SHOWN {
+                    format!("{:?}", r.matched)
+                } else {
+                    let head: Vec<usize> = r.matched.iter().take(SHOWN).copied().collect();
+                    format!("{head:?} … ({} total)", r.matched.len())
+                };
+                let verdict = if agree { "AGREE" } else { "DISAGREE" };
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "{verdict}\nclaimed: {}\nexact value: {}\nprovenance row indices: {idx}\nThe exact value is computed over all held bytes; coffer_pick(handle, indices) re-fetches the backing rows.",
+                    a.expected, r.value,
+                ))]))
+            }
+            None => Ok(CallToolResult::error(vec![Content::text(
+                "cannot check: the handle is not a JSON array, or the aggregated field is present-but-non-numeric",
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "Issue a re-executable EXACTNESS RECEIPT for a typed aggregate over a held JSON \
+        array (agg = count|sum|mean|min|max over the `where` predicate conjunction, field required for \
+        all but count). Returns a small portable JSON proof binding the predicate + aggregate + value + \
+        backing-row indices + a SHA-256 of the backing rows. Persist it and hand it to anyone: \
+        coffer_verify_receipt re-derives the answer from the bytes later, in a fresh process, returning \
+        VALID or a tamper signal — no model call. handle may be a full handle or a unique <<cof:HASH>> \
+        sentinel prefix."
+    )]
+    async fn coffer_receipt(
+        &self,
+        Parameters(a): Parameters<AggregateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(bytes) = self.get_handle(&a.handle) else {
+            return Ok(unknown_handle());
+        };
+        let Some(agg) = parse_agg(&a.agg, a.field.as_deref()) else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "agg must be count|sum|mean|min|max, and sum/mean/min/max require a field",
+            )]));
+        };
+        let predicates = predicates_from_args(&a.predicates);
+        match coffer_core::issue_receipt(&bytes, &predicates, &agg) {
+            Some(receipt) => match serde_json::to_string(&receipt) {
+                Ok(wire) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "{wire}\n\nStore this receipt. Re-verify it later against the data with coffer_verify_receipt(handle, receipt)."
+                ))])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "could not serialize receipt: {e}"
+                ))])),
+            },
+            None => Ok(CallToolResult::error(vec![Content::text(
+                "no receipt: the handle is not a JSON array, or the aggregated field is present-but-non-numeric",
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "Verify a re-executable exactness receipt (from coffer_receipt) against a held \
+        JSON array: re-run the receipt's query over the bytes and report VALID (the data reproduces the \
+        attested answer byte-identically), VALUE_MISMATCH (the data yields a different number), \
+        BACKING_TAMPERED (the value holds but the backing rows changed), REFUSED, or MALFORMED_RECEIPT. \
+        No model call. `receipt` is the JSON string coffer_receipt returned. handle may be a full handle \
+        or a unique <<cof:HASH>> sentinel prefix."
+    )]
+    async fn coffer_verify_receipt(
+        &self,
+        Parameters(a): Parameters<VerifyReceiptArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(bytes) = self.get_handle(&a.handle) else {
+            return Ok(unknown_handle());
+        };
+        let receipt: coffer_core::Receipt = match serde_json::from_str(&a.receipt) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "receipt is not a valid coffer receipt JSON: {e}"
+                ))]));
+            }
+        };
+        let verdict = coffer_core::verify_receipt(&receipt, &bytes);
+        let text = match &verdict {
+            coffer_core::ReceiptVerdict::Valid => {
+                "VALID — the held bytes reproduce the attested answer byte-identically.".to_string()
+            }
+            coffer_core::ReceiptVerdict::ValueMismatch { expected, actual } => format!(
+                "VALUE_MISMATCH — the receipt attests {expected}, but the data now yields {actual}."
+            ),
+            coffer_core::ReceiptVerdict::BackingTampered => {
+                "BACKING_TAMPERED — the value holds but the backing rows changed.".to_string()
+            }
+            coffer_core::ReceiptVerdict::Refused => {
+                "REFUSED — the receipt's query no longer runs over this input.".to_string()
+            }
+            coffer_core::ReceiptVerdict::MalformedReceipt => {
+                "MALFORMED_RECEIPT — the receipt carries an unknown op/agg and cannot be re-executed."
+                    .to_string()
+            }
+        };
+        // A mismatch is a real, useful answer, not a tool error — return it as success text.
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     /// Pull the rows at an explicit set of indices (e.g. a digest's provenance) as a NEW handle.
     #[tool(
         description = "Pull the rows at an explicit set of indices from a held JSON array and hold them \
@@ -1435,6 +1731,69 @@ struct PickArgs {
     indices: Vec<usize>,
 }
 #[derive(Deserialize, JsonSchema)]
+struct BucketArgs {
+    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    handle: String,
+    /// The numeric field to bucket on; rows are grouped by floor(value / width).
+    field: String,
+    /// The band width; must be > 0.
+    width: f64,
+    /// Aggregate to compute within each band: count | sum | mean | min | max. Defaults to count.
+    agg: Option<String>,
+    /// Field to aggregate within each band. Required for sum/mean/min/max; ignored for count.
+    value_field: Option<String>,
+}
+#[derive(Deserialize, JsonSchema)]
+struct WindowArgs {
+    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    handle: String,
+    /// The pattern to match (case-insensitive substring) on each line.
+    pattern: String,
+    /// Block size in lines; match counts are reported per block of this many lines. Must be >= 1.
+    window: usize,
+}
+#[derive(Deserialize, JsonSchema)]
+struct JoinArgs {
+    /// The LEFT array handle — the rows being aggregated.
+    left: String,
+    /// The RIGHT array handle — the lookup/filter side.
+    right: String,
+    /// The equi-join field on the LEFT rows.
+    left_key: String,
+    /// The equi-join field on the RIGHT rows.
+    right_key: String,
+    /// Aggregate over the qualifying LEFT rows: count | sum | mean | min | max. Defaults to count.
+    agg: Option<String>,
+    /// Field to aggregate over the LEFT rows. Required for sum/mean/min/max; ignored for count.
+    field: Option<String>,
+    /// Optional conjunctive filter on the RIGHT rows (ignored when group_by is set).
+    #[serde(default)]
+    right_where: Vec<PredicateArg>,
+    /// Set to a RIGHT field for a project-join group-by ("agg BY right.<field>") instead of a scalar.
+    group_by: Option<String>,
+}
+#[derive(Deserialize, JsonSchema)]
+struct CheckClaimArgs {
+    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    handle: String,
+    /// Conjunctive filter predicates; a row is counted only if it passes ALL of them. Empty = all rows.
+    #[serde(rename = "where", default)]
+    predicates: Vec<PredicateArg>,
+    /// Aggregate to recompute and compare: count | sum | mean | min | max.
+    agg: String,
+    /// Field to aggregate over. Required for sum/mean/min/max; ignored for count.
+    field: Option<String>,
+    /// The number the agent claimed; AGREE if it matches the exact recomputed value, else DISAGREE.
+    expected: f64,
+}
+#[derive(Deserialize, JsonSchema)]
+struct VerifyReceiptArgs {
+    /// The handle holding the data to re-verify against, or a unique shared-CAS sentinel prefix.
+    handle: String,
+    /// The receipt JSON string returned by coffer_receipt.
+    receipt: String,
+}
+#[derive(Deserialize, JsonSchema)]
 struct RowsArgs {
     /// The handle returned by coffer_run / coffer_ingest, or a unique shared-CAS sentinel prefix.
     handle: String,
@@ -1526,12 +1885,13 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AggregateArgs, Coffer, DEFAULT_MAX_ROWS, DescribeArgs, IngestView, PickArgs, PredicateArg,
-        QueryArgs, RetrieveLimits, RunLimits, SelectArgs, UnfoldArgs, byte_window, fact_card,
-        ingest_view, ingested_text_with_view, positive_usize_from_value, render_json_path,
-        render_json_rows, render_retrieved_bytes, render_text_lines, render_text_search,
-        retrieve_limits_from_values, run_limits_from_values, run_policy_from_values,
-        run_shell_command, unfold_shared_cas_result,
+        AggregateArgs, BucketArgs, CheckClaimArgs, Coffer, DEFAULT_MAX_ROWS, DescribeArgs,
+        IngestView, JoinArgs, PickArgs, PredicateArg, QueryArgs, RetrieveLimits, RunLimits,
+        SelectArgs, UnfoldArgs, VerifyReceiptArgs, WindowArgs, byte_window, fact_card, ingest_view,
+        ingested_text_with_view, positive_usize_from_value, render_json_path, render_json_rows,
+        render_retrieved_bytes, render_text_lines, render_text_search, retrieve_limits_from_values,
+        run_limits_from_values, run_policy_from_values, run_shell_command,
+        unfold_shared_cas_result,
     };
     use coffer_cas::{Cas, ContentHash, MemoryCas, SqliteCas};
     use rmcp::handler::server::wrapper::Parameters;
@@ -1750,6 +2110,242 @@ impl Widget {
             .await
             .unwrap();
         assert_eq!(bad.is_error, Some(true), "{}", tool_text(&bad));
+    }
+
+    #[tokio::test]
+    async fn coffer_bucket_and_window_histograms_wire_through() {
+        let server = Coffer::in_memory();
+        // latencies 0,50,100,…,450 → width-100 bands: [0,2) [100,2) [200,2) [300,2) [400,2).
+        let rows = (0..10)
+            .map(|i| serde_json::json!({ "latency_ms": i * 50 }))
+            .collect::<Vec<_>>();
+        let handle = server
+            .put_bytes(&serde_json::to_vec(&rows).unwrap())
+            .as_str()
+            .to_string();
+        let r = server
+            .coffer_bucket(Parameters(BucketArgs {
+                handle,
+                field: "latency_ms".into(),
+                width: 100.0,
+                agg: None,
+                value_field: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(false), "{}", tool_text(&r));
+        // Five bands, each with two rows.
+        assert_eq!(tool_text(&r).matches('→').count(), 5, "{}", tool_text(&r));
+
+        // width <= 0 refuses rather than guessing.
+        let h = server
+            .put_bytes(&serde_json::to_vec(&rows).unwrap())
+            .as_str()
+            .to_string();
+        let bad = server
+            .coffer_bucket(Parameters(BucketArgs {
+                handle: h,
+                field: "latency_ms".into(),
+                width: 0.0,
+                agg: None,
+                value_field: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true), "{}", tool_text(&bad));
+
+        // Windowed log histogram: 2 ERROR lines, one per 2-line block.
+        let log = b"INFO ok\nERROR boom\nINFO ok\nERROR again\nINFO fine\n";
+        let h2 = server.put_bytes(log).as_str().to_string();
+        let w = server
+            .coffer_window(Parameters(WindowArgs {
+                handle: h2,
+                pattern: "error".into(),
+                window: 2,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(w.is_error, Some(false), "{}", tool_text(&w));
+        assert_eq!(tool_text(&w).matches('→').count(), 2, "{}", tool_text(&w));
+    }
+
+    #[tokio::test]
+    async fn coffer_join_semi_join_and_project_group() {
+        let server = Coffer::in_memory();
+        let orders = serde_json::to_vec(&serde_json::json!([
+            { "customer_id": 1, "amount": 100 },
+            { "customer_id": 2, "amount": 50 },
+            { "customer_id": 1, "amount": 25 },
+            { "customer_id": 3, "amount": 999 }
+        ]))
+        .unwrap();
+        let customers = serde_json::to_vec(&serde_json::json!([
+            { "id": 1, "tier": "gold", "region": "us" },
+            { "id": 2, "tier": "silver", "region": "us" },
+            { "id": 3, "tier": "gold", "region": "eu" }
+        ]))
+        .unwrap();
+        let left = server.put_bytes(&orders).as_str().to_string();
+        let right = server.put_bytes(&customers).as_str().to_string();
+
+        // sum order.amount for orders whose customer is gold-tier → customers 1,3 → 100+25+999 = 1124.
+        let r = server
+            .coffer_join(Parameters(JoinArgs {
+                left: left.clone(),
+                right: right.clone(),
+                left_key: "customer_id".into(),
+                right_key: "id".into(),
+                agg: Some("sum".into()),
+                field: Some("amount".into()),
+                right_where: vec![PredicateArg {
+                    field: "tier".into(),
+                    op: "eq".into(),
+                    value: "gold".into(),
+                }],
+                group_by: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(false), "{}", tool_text(&r));
+        assert!(tool_text(&r).contains("1124"), "{}", tool_text(&r));
+        assert!(
+            tool_text(&r).contains("joined LEFT row indices"),
+            "{}",
+            tool_text(&r)
+        );
+
+        // project-join group-by: revenue BY customer.region → us 100+50+25=175, eu 999.
+        let g = server
+            .coffer_join(Parameters(JoinArgs {
+                left,
+                right,
+                left_key: "customer_id".into(),
+                right_key: "id".into(),
+                agg: Some("sum".into()),
+                field: Some("amount".into()),
+                right_where: vec![],
+                group_by: Some("region".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(g.is_error, Some(false), "{}", tool_text(&g));
+        let gt = tool_text(&g);
+        assert!(gt.contains("175") && gt.contains("999"), "{gt}");
+    }
+
+    #[tokio::test]
+    async fn coffer_check_claim_agrees_and_disagrees() {
+        let server = Coffer::in_memory();
+        let rows = serde_json::json!([
+            { "status": "ok" }, { "status": "error" }, { "status": "error" }
+        ]);
+        let handle = server
+            .put_bytes(&serde_json::to_vec(&rows).unwrap())
+            .as_str()
+            .to_string();
+
+        // The true count of error rows is 2.
+        let agree = server
+            .coffer_check_claim(Parameters(CheckClaimArgs {
+                handle: handle.clone(),
+                predicates: vec![PredicateArg {
+                    field: "status".into(),
+                    op: "eq".into(),
+                    value: "error".into(),
+                }],
+                agg: "count".into(),
+                field: None,
+                expected: 2.0,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(agree.is_error, Some(false), "{}", tool_text(&agree));
+        assert!(tool_text(&agree).contains("AGREE"), "{}", tool_text(&agree));
+
+        let disagree = server
+            .coffer_check_claim(Parameters(CheckClaimArgs {
+                handle,
+                predicates: vec![PredicateArg {
+                    field: "status".into(),
+                    op: "eq".into(),
+                    value: "error".into(),
+                }],
+                agg: "count".into(),
+                field: None,
+                expected: 9.0,
+            }))
+            .await
+            .unwrap();
+        let dt = tool_text(&disagree);
+        assert!(
+            dt.contains("DISAGREE") && dt.contains("exact value: 2"),
+            "{dt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn coffer_receipt_round_trips_and_detects_tamper() {
+        let server = Coffer::in_memory();
+        let rows = serde_json::json!([
+            { "status": "ok", "cost": 10 },
+            { "status": "error", "cost": 40 },
+            { "status": "error", "cost": 60 }
+        ]);
+        let handle = server
+            .put_bytes(&serde_json::to_vec(&rows).unwrap())
+            .as_str()
+            .to_string();
+
+        // Issue a receipt for sum(cost) where status == error (= 100).
+        let issued = server
+            .coffer_receipt(Parameters(AggregateArgs {
+                handle: handle.clone(),
+                predicates: vec![PredicateArg {
+                    field: "status".into(),
+                    op: "eq".into(),
+                    value: "error".into(),
+                }],
+                agg: "sum".into(),
+                field: Some("cost".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(issued.is_error, Some(false), "{}", tool_text(&issued));
+        // The receipt JSON is the first line of the response.
+        let receipt_json = tool_text(&issued).lines().next().unwrap().to_string();
+
+        // Verify against the original data -> VALID.
+        let ok = server
+            .coffer_verify_receipt(Parameters(VerifyReceiptArgs {
+                handle,
+                receipt: receipt_json.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(tool_text(&ok).contains("VALID"), "{}", tool_text(&ok));
+
+        // Verify the SAME receipt against tampered data held under a new handle -> VALUE_MISMATCH.
+        let tampered = serde_json::json!([
+            { "status": "ok", "cost": 10 },
+            { "status": "error", "cost": 999 },
+            { "status": "error", "cost": 60 }
+        ]);
+        let bad_handle = server
+            .put_bytes(&serde_json::to_vec(&tampered).unwrap())
+            .as_str()
+            .to_string();
+        let bad = server
+            .coffer_verify_receipt(Parameters(VerifyReceiptArgs {
+                handle: bad_handle,
+                receipt: receipt_json,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            tool_text(&bad).contains("VALUE_MISMATCH"),
+            "{}",
+            tool_text(&bad)
+        );
     }
 
     #[tokio::test]

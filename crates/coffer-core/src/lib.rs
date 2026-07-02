@@ -1,4 +1,5 @@
-//! coffer-core: type-aware, reversible (CCR) compression of agent tool-output.
+//! coffer-core: byte-exact, reversible compression of agent tool-output, plus an exact
+//! compute-digest over the offloaded bytes.
 //!
 //! # The Stage 0 invariant
 //!
@@ -40,6 +41,7 @@ pub mod attest;
 pub mod detect;
 pub mod doc;
 pub mod index;
+pub mod receipt;
 pub mod redact;
 
 /// Lower-level building blocks for composing custom unit selections — the affordance the
@@ -62,5 +64,6 @@ pub use index::{
     count_matches_per_window, describe, digest, digest_across, digest_ndjson, join_aggregate,
     join_group_aggregate, pick_rows, query_aggregate, query_subset, superlative_rows,
 };
+pub use receipt::{Receipt, ReceiptPredicate, ReceiptVerdict, issue_receipt, verify_receipt};
 pub use redact::{Redacted, Secret, redact_secrets};
 pub use view::{CompactViewDoc, compress_structural_code_to_budget, structural_code_view};

@@ -5,11 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Type-aware, reversible (CCR) compression of agent tool-output."
+description = "Byte-exact, reversible compression of agent tool-output, plus an exact compute-digest over the offloaded bytes."
 
 [dependencies]
 coffer-cas = { path = "../coffer-cas" }
 coffer-tokenizer = { path = "../coffer-tokenizer" }
+# A re-executable exactness receipt (the `receipt` module) is serde-serialized so a third party can
+# persist it and re-verify in a fresh process; the engine's JSON model stays serde_json.
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
