@@ -135,7 +135,9 @@ codegen round-trip, and keeps every original byte recoverable.
 ## Quickstart
 
 ```sh
-# Install straight from git (no release binaries yet; needs a Rust toolchain):
+# Prebuilt binaries (linux x86_64/aarch64, macOS x86_64/aarch64, windows x86_64):
+#   https://github.com/haru0416-dev/coffer/releases — sha256 checksums included.
+# Or install from source (needs a Rust toolchain):
 cargo install --git https://github.com/haru0416-dev/coffer coffer-wrap --locked
 # (same for coffer-mcp and coffer-proxy)
 
@@ -157,8 +159,8 @@ processes — offload in the gateway or proxy, recover and query in the MCP serv
 [`docs/deployment.md`](docs/deployment.md) for production wiring.
 
 An npm launcher is scaffolded under [`npm/`](npm/): once published it will run the prebuilt native
-binary for your platform (`npx coffer coffer-mcp`). It is **not on the npm registry yet** — for
-now, build from source as above.
+binary for your platform (`npx coffer coffer-mcp`). It is **not on the npm registry yet** — use
+the release binaries or build from source as above.
 
 Safe by default: the proxy refuses a non-loopback bind unless `COFFER_PROXY_ALLOW_PUBLIC=1` (it
 has no auth and replays your upstream key); the MCP `coffer_run` shell tool is disabled unless
