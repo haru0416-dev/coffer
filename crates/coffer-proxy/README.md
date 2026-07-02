@@ -1,9 +1,12 @@
 # coffer-proxy
 
-A transparent-compression proxy. Point an MCP/Anthropic agent at it and it compresses the
-large `tool_result` blocks of every `POST /v1/messages` request with the coffer engine before
-forwarding to the real API — so huge tool output never costs the model context. It modifies only the
-request; the response streams back unchanged.
+A transparent-compression proxy. Point an agent at it and it compresses the large tool-output
+values of every request with the coffer engine before forwarding to the real API — so huge tool
+output never costs the model context. Three request shapes are rewritten: Anthropic Messages
+`tool_result` blocks (`POST /v1/messages`), OpenAI Responses `*_call_output` items (`POST
+…/responses`), and Ollama `/api/chat` tool messages. It modifies only the request; the response
+streams back unchanged. Every rewritten block leads with a one-line sentinel explainer so a
+`<<cof:…>>` marker is never mistaken for truncation or corruption.
 
 This is the **cost-effective transparent shape**: unlike a model-invoked tool, there is no "model
 chooses coffer vs `jq`" decision, so it just shrinks what would otherwise be paid for in full.
@@ -83,6 +86,9 @@ So the proxy compresses ⊕ the MCP retrieves: byte-exact, lossless from the mod
 | `COFFER_PROXY_LISTEN` | `127.0.0.1:8788` | inbound address |
 | `COFFER_PROXY_UPSTREAM` | `https://api.anthropic.com` | real API base (http for a mock) |
 | `COFFER_PROXY_MIN` | `1024` | min `tool_result` bytes to compress |
+| `COFFER_PROXY_REDUCTION` | `0.8` | fraction of each block's tokens to cut |
+| `COFFER_PROXY_MAX_KEPT_TOKENS` | `4000` | absolute per-block ceiling on kept tokens (heuristic count); `0` disables — effective keep is `min(raw × (1 − reduction), ceiling)` |
+| `COFFER_PROXY_EXPLAIN` | on | set `0`/`false`/`off` to drop the in-band sentinel explainer |
 | `COFFER_PROXY_MAX_BODY_MB` | `64` | max inbound request body size in MiB; larger requests return `413 Payload Too Large` |
 | `COFFER_CAS_DB` | _(unset → in-memory)_ | shared SqliteCas path; required for proxy unfold and persistent MCP handles |
 | `COFFER_CAS_SOFT_CAP_MB` | _(unset)_ | optional resident-cache warning threshold, in MiB; this is not eviction |
@@ -128,13 +134,9 @@ So the proxy compresses ⊕ the MCP retrieves: byte-exact, lossless from the mod
   lifetime.
 - **Transport**: inbound is Hyper HTTP/1.x with keep-alive; upstream is Reqwest over HTTP or HTTPS.
   HTTP/2 inbound and provider-specific hardening remain follow-ups.
-- **Provider**: Anthropic `/v1/messages` only. The codex/ChatGPT OAuth backend is hard to proxy, so
-  there the MCP server stays the integration shape.
+- **Providers**: Anthropic Messages (`/v1/messages`), OpenAI Responses (paths ending in
+  `/responses`), and Ollama (`/api/chat`). Anything else — including OpenAI
+  `/v1/chat/completions` — passes through unchanged (fail-open).
 
-For production-oriented setup, smoke tests, and failure modes, see
-[`docs/deployment.md`](../../docs/deployment.md). Copy-editable deployment
-templates live under [`deploy/`](../../deploy/).
-
-After `cargo build --release -p coffer-proxy`, run
-[`scripts/proxy-smoke.sh`](../../scripts/proxy-smoke.sh) to exercise the release
-binary against a local mock upstream and verify shared-CAS recovery.
+For production-oriented setup and failure modes, see
+[`docs/deployment.md`](../../docs/deployment.md).

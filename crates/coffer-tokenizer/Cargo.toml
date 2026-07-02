@@ -10,7 +10,7 @@ description = "Token counting with a seam for per-model parity (the headline num
 [features]
 default = []
 # Offline, byte-exact OpenAI counting. Off by default so the Stage 0 build stays light;
-# Claude/Gemini parity is API-backed and lands later (see docs/PREREGISTRATION.md §4).
+# Claude/Gemini parity is API-backed and lands later (no offline tokenizer exists for Claude 3+).
 tiktoken = ["dep:tiktoken-rs"]
 
 [dependencies]

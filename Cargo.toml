@@ -40,7 +40,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 # for an OS-independent roots-only build, inject roots via the builder instead.
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 
-# tokenizer parity (OpenAI offline-exact; Claude/Gemini are API-counted in coffer-tokenizer)
+# tokenizer parity (OpenAI offline-exact behind coffer-tokenizer's `tiktoken` feature; other
+# providers currently fall back to the chars/4 heuristic — see coffer-tokenizer's crate docs)
 tiktoken-rs = "0.12"
 
 # CLI / observability

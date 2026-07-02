@@ -2,8 +2,7 @@
 //!
 //! Token *savings* are only real when counted with the target model's own tokenizer.
 //! Stage 0 ships the [`TokenCounter`] trait plus a cheap heuristic so the rest of the
-//! system can be wired up; the real counters land later (see `docs/PREREGISTRATION.md`
-//! §4 and `docs/REFERENCES.md`):
+//! system can be wired up; real per-provider counters land incrementally:
 //!
 //! - **OpenAI/GPT** — offline, byte-exact via tiktoken-rs (`TiktokenCounter`, behind
 //!   the `tiktoken` feature).

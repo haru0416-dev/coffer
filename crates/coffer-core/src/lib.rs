@@ -12,8 +12,8 @@
 //! summarized for the model — or even if content detection misclassifies it.
 //!
 //! Compression *effectiveness* (how much [`CompressedDoc::render_for_model`] shrinks
-//! vs the input) is a **separate axis**, measured later under the protocol in
-//! `docs/PREREGISTRATION.md`. It is never blended into the fidelity guarantee: a codec
+//! vs the input) is a **separate axis**, measured under the commitments in the README's
+//! "Honesty, up front" (see also `docs/DESIGN.md` §7). It is never blended into the fidelity guarantee: a codec
 //! can be a poor compressor and still be perfectly lossless.
 
 #![warn(clippy::pedantic, missing_docs)]

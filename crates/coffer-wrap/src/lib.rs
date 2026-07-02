@@ -10,8 +10,9 @@
 //! 2. `tools/call` responses whose text content exceeds a token threshold have that
 //!    content stored byte-exact in a SHA-256 content-addressed store and replaced with a
 //!    compact fact card carrying the handle. The injected tools then answer
-//!    digest/aggregate/search/lines/retrieve queries against the stored bytes without
-//!    the payload ever entering the model context.
+//!    describe/digest/aggregate/rows/search/lines/retrieve queries against the stored
+//!    bytes without the payload ever entering the model context (search is row-aware on
+//!    JSON arrays and its matches feed straight into `rows` for verbatim fetches).
 //!
 //! Everything else — notifications, server-initiated requests, unknown methods, error
 //! results, malformed lines — is forwarded verbatim (fail-open). The wrap layer never

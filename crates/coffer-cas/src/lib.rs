@@ -3,8 +3,8 @@
 //! This is the persistence half of coffer's reversibility guarantee. [`Cas::put`] stores
 //! the *exact original bytes*; [`Cas::get`] returns them unchanged. coffer-core stores the
 //! original of any region it compresses here, so reconstruction is byte-exact regardless
-//! of how the compressor rendered that region for the model. (See `docs/PREREGISTRATION.md`
-//! §4: reversibility comes from storing original bytes, never re-serializing a value.)
+//! of how the compressor rendered that region for the model. (Reversibility comes from
+//! storing original bytes, never re-serializing a value — see `docs/DESIGN.md` §1.)
 //!
 //! `Cas` uses interior mutability (`put(&self)`) and is `Send + Sync`, so the Stage 1
 //! budget-matched harness can share one store across concurrent tasks without serializing
