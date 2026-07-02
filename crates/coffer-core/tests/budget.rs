@@ -155,24 +155,51 @@ fn non_positive_reduction_skips_token_counting() {
 }
 
 #[test]
-fn text_reduction_skips_token_counting() {
-    struct PanicCounter;
-    impl TokenCounter for PanicCounter {
-        fn count(&self, _text: &str) -> usize {
-            panic!("text inputs cannot be budget-compressed and should not count tokens")
-        }
-
-        fn model_label(&self) -> &'static str {
-            "panic-counter"
-        }
-    }
-
-    let input = b"plain prose without enough line structure to be treated as logs";
+fn single_line_text_approaches_budget_via_whole_offload() {
+    // One unbroken line has no head+tail window to keep; an explicit budget is honored by
+    // offloading the whole input (mirrors the non-array JSON fallback), not ignored.
+    // (Inputs under MIN_COMPRESS_BYTES still pass through — not worth a CAS round-trip.)
+    let input = "plain prose without enough line structure to be treated as logs, "
+        .repeat(8)
+        .into_bytes();
     let cas = MemoryCas::new();
-    let doc = compress_to_budget(input, &cas, Budget::Reduction(0.8), &PanicCounter);
-    assert!(cas.is_empty(), "text reduction must not offload anything");
+    let tok = HeuristicCounter;
+    let doc = compress_to_budget(&input, &cas, Budget::Reduction(0.8), &tok);
     assert_eq!(doc.segments.len(), 1);
-    assert!(matches!(doc.segments[0], Segment::Verbatim(_)));
+    assert!(matches!(doc.segments[0], Segment::Ref { .. }));
+    assert_eq!(doc.reconstruct(&cas).unwrap(), input);
+}
+
+#[test]
+fn multiline_text_windows_lines_under_explicit_budget() {
+    // Oversized plain text (a diff, a file dump, prose) partitions into physical lines
+    // under an explicit budget: head+tail lines stay verbatim, the middle collapses into
+    // one sentinel — and the original rebuilds byte-for-byte.
+    let mut s = String::new();
+    for i in 0..200 {
+        s.push_str(&format!(
+            "line {i}: some ordinary prose content that is neither a log nor JSON at all\n"
+        ));
+    }
+    let input = s.into_bytes();
+    let cas = MemoryCas::new();
+    let tok = HeuristicCounter;
+    let doc = compress_to_budget(&input, &cas, Budget::Tokens(200), &tok);
+
+    let render = doc.render_for_model();
+    assert!(
+        tok.count(&render) <= 200,
+        "must land under the explicit target (got {})",
+        tok.count(&render)
+    );
+    assert!(
+        render.contains("lines>>"),
+        "elided middle must be a lines sentinel: {render}"
+    );
+    assert!(
+        render.starts_with("line 0:") && render.trim_end().ends_with("JSON at all"),
+        "head and tail lines must survive verbatim"
+    );
     assert_eq!(doc.reconstruct(&cas).unwrap(), input);
 }
 

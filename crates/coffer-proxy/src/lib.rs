@@ -20,10 +20,10 @@
     clippy::cast_sign_loss
 )]
 // Test fixtures favor readability over perf/style nits (same as coffer-core).
-#![cfg_attr(test, allow(clippy::format_push_string))]
+#![cfg_attr(test, allow(clippy::format_push_string, clippy::format_collect))]
 
 use coffer_cas::Cas;
-use coffer_core::{Budget, Compressor};
+use coffer_core::{Budget, Compressor, ContentType, detect};
 use coffer_tokenizer::{HeuristicCounter, TokenCounter};
 use serde_json::Value;
 
@@ -336,11 +336,23 @@ fn squash(
         DEFAULT_REDUCTION
     };
     let raw_tokens = counter.count(text);
-    let mut target = (raw_tokens as f32 * (1.0 - reduction)) as usize;
-    if opts.max_kept_tokens > 0 {
-        target = target.min(opts.max_kept_tokens);
-    }
-    let target = target.max(1);
+    // Plain text (prose, code, diffs, file dumps) is the shape the model most often needs to
+    // read whole, so restraint stays the default: a text block is rewritten only once it
+    // exceeds the absolute ceiling — where "read it whole" is no longer on the table — and
+    // then with pure ceiling semantics, no proportional cut. With the ceiling disabled there
+    // is no "too big to read" line, so text keeps the historical passthrough.
+    let target = if detect(text.as_bytes()) == ContentType::Text {
+        if opts.max_kept_tokens == 0 || raw_tokens <= opts.max_kept_tokens {
+            return false;
+        }
+        opts.max_kept_tokens
+    } else {
+        let mut target = (raw_tokens as f32 * (1.0 - reduction)) as usize;
+        if opts.max_kept_tokens > 0 {
+            target = target.min(opts.max_kept_tokens);
+        }
+        target.max(1)
+    };
     let Ok(doc) = Compressor::new()
         .budget(Budget::Tokens(target))
         .counter(&counter)
@@ -513,6 +525,75 @@ mod tests {
         assert!(
             kept_at(0.5) > kept_at(0.95),
             "a gentler reduction must keep more"
+        );
+    }
+
+    #[test]
+    fn small_prose_tool_result_stays_untouched() {
+        // Text the model can read whole must NOT be rewritten (it would only force
+        // retrieve round-trips) — restraint holds below the ceiling.
+        let cas = MemoryCas::new();
+        let prose: String = (0..40)
+            .map(|i| {
+                format!(
+                    "{} sentence number {i} meanders through ordinary prose without structure.\n",
+                    [
+                        "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"
+                    ][i % 8]
+                )
+            })
+            .collect();
+        let body = request_with_tool_result(&prose);
+        let (out, kind) = compress_request_body_kind(&body, &cas, 1024);
+        assert_eq!(kind, TransformKind::NoShrink);
+        assert_eq!(out, body, "small prose must pass through byte-identical");
+    }
+
+    #[test]
+    fn oversized_prose_is_capped_with_pure_ceiling_semantics() {
+        // Past the ceiling, "read it whole" is off the table: text windows by lines to the
+        // ceiling itself (no proportional cut), leading with the explainer.
+        let cas = MemoryCas::new();
+        let prose: String = (0..2_000)
+            .map(|i| {
+                format!(
+                    "{} sentence number {i} meanders through ordinary prose without structure.\n",
+                    [
+                        "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel",
+                        "India", "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa",
+                        "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey",
+                        "Xray", "Yankee", "Zulu",
+                    ][i % 26]
+                )
+            })
+            .collect();
+        let counter = HeuristicCounter;
+        assert!(
+            counter.count(&prose) > 2_000,
+            "fixture must exceed the ceiling"
+        );
+
+        let (out, kind) = compress_request_body_kind(
+            &request_with_tool_result(&prose),
+            &cas,
+            RewriteOptions {
+                min_compress: 1024,
+                explain: true,
+                reduction: DEFAULT_REDUCTION,
+                max_kept_tokens: 2_000,
+            },
+        );
+        assert_eq!(kind, TransformKind::Compressed);
+        let text = tool_result_text(&out);
+        let render = strip_explainer(&text);
+        assert!(
+            render.contains("<<cof:"),
+            "elided middle must carry a sentinel"
+        );
+        let kept = counter.count(render);
+        assert!(
+            kept <= 2_000 && kept > 1_000,
+            "text gets ceiling semantics, not the proportional cut (kept {kept})"
         );
     }
 

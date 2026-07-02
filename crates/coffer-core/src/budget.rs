@@ -55,9 +55,9 @@ fn apply_reduction(raw_tokens: usize, frac: f32) -> usize {
 }
 
 /// Compress `input` toward `budget`, byte-exact reversible. Keeps a head+tail window of whole JSON
-/// array elements / log lines (dropped runs coalesced into `Ref`s) to approach the token target;
-/// for logs, identical consecutive lines are deduplicated first so the budget is spent on distinct
-/// content. Falls back to whole-input behavior when the input cannot be partitioned.
+/// array elements / log or text lines (dropped runs coalesced into `Ref`s) to approach the token
+/// target; for logs, identical consecutive lines are deduplicated first so the budget is spent on
+/// distinct content. Falls back to whole-input behavior when the input cannot be partitioned.
 ///
 /// Unlike [`compress`](crate::compress), this honors the requested target regardless of
 /// `MIN_COMPRESS_BYTES`: the caller asked for a specific budget, so even small inputs may
@@ -76,9 +76,6 @@ pub fn compress_to_budget(
     }
 
     let content_type = detect(input);
-    if content_type == ContentType::Text {
-        return verbatim(input);
-    }
 
     let target = match budget {
         Budget::Tokens(t) => t,
@@ -107,7 +104,19 @@ pub fn compress_to_budget(
             }
             (u, "lines")
         }
-        ContentType::Text => unreachable!("text returned before budget target calculation"),
+        ContentType::Text => {
+            // Plain text partitions into physical lines under an EXPLICIT budget: the caller
+            // asked for a token target, and for an oversized prose/diff/file dump the
+            // alternative is not "the model reads it whole" — it is a failed or flooding
+            // call. Reversibility is structural, so windowing text is always safe. A single
+            // unbroken line has no window to keep; approach the budget via whole-input
+            // offload instead (mirrors the non-array JSON fallback).
+            let u = scan_log_lines(input);
+            if u.len() <= 1 {
+                return whole_or_passthrough_to_budget(input, cas, target, counter);
+            }
+            (u, "lines")
+        }
     };
 
     // For logs, dedup is free information-preserving compression applied first: only DISTINCT lines
@@ -278,7 +287,9 @@ fn whole_or_passthrough_to_budget(
     if raw <= target {
         verbatim(input)
     } else {
-        offload_whole(input, cas)
+        // Any-type offload: this path only runs under an explicit budget, where "pass an
+        // uncompressible type through" would silently ignore the caller's target.
+        crate::compress::offload_whole_any_min(input, cas, crate::MIN_COMPRESS_BYTES)
     }
 }
 

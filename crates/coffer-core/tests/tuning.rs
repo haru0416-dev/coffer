@@ -2,8 +2,9 @@
 //!
 //! These are the regression gates for the tuning program: the stable properties every tuning step
 //! must preserve — compressible classes (JSON arrays, logs) shrink and stay byte-exact reversible,
-//! while content the model reads whole (prose/code) is passed through verbatim (the deliberate
-//! restraint, not a miss). Individual tuning steps ADD assertions here (e.g. T-FIDELITY's head+tail
+//! while SMALL prose/code the model reads whole passes through verbatim (the deliberate restraint —
+//! oversized text does window by lines under an explicit budget, where "read it whole" is no longer
+//! an option). Individual tuning steps ADD assertions here (e.g. T-FIDELITY's head+tail
 //! survival); they must not weaken these.
 //!
 //! Manual measurement across a wider real corpus lives in `examples/filter.rs`.
@@ -246,8 +247,10 @@ fn budget_dedups_logs_so_distinct_middle_events_survive() {
 
 #[test]
 fn prose_passes_through_verbatim() {
-    // Content the model reads whole: a blind transparent layer must NOT compress it (compressing it
-    // would only force retrieve round-trips). Restraint is the correct behavior here.
+    // SMALL content the model reads whole: compressing it would only force retrieve
+    // round-trips, so it passes through — via the compressor's min_bytes floor here, and via
+    // the proxy's ceiling gate for text in flight. (OVERSIZED text does window by lines under
+    // an explicit budget; see tests/budget.rs.)
     let input =
         b"The quick brown fox jumps over the lazy dog. This is ordinary prose, not a log or a JSON \
           array, so the engine should leave it exactly as-is rather than offload any of it."

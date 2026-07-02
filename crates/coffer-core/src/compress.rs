@@ -36,6 +36,31 @@ pub(crate) fn offload_whole(input: &[u8], cas: &dyn Cas) -> CompressedDoc {
     offload_whole_min(input, cas, MIN_COMPRESS_BYTES)
 }
 
+/// [`offload_whole_min`] without the compressible-type gate: offloads ANY content type at or
+/// above `min_bytes`. Reserved for the explicit-budget path — the caller asked for a token
+/// target, so even an unpartitionable text blob must approach it rather than pass through.
+pub(crate) fn offload_whole_any_min(
+    input: &[u8],
+    cas: &dyn Cas,
+    min_bytes: usize,
+) -> CompressedDoc {
+    if input.len() < min_bytes {
+        return CompressedDoc {
+            segments: vec![Segment::Verbatim(input.to_vec())],
+        };
+    }
+    let (content_type, parsed) = detect_with_value(input);
+    let summary = summarize(content_type, input, parsed.as_ref());
+    let hash = cas.put(input); // store the EXACT original bytes — never a re-serialization
+    CompressedDoc {
+        segments: vec![Segment::Ref {
+            hash,
+            summary,
+            original_len: input.len(),
+        }],
+    }
+}
+
 /// [`offload_whole`] with a caller-chosen minimum-size threshold (the `Compressor` `min_bytes`
 /// knob): a compressible input below `min_bytes` is passed through verbatim.
 pub(crate) fn offload_whole_min(input: &[u8], cas: &dyn Cas, min_bytes: usize) -> CompressedDoc {

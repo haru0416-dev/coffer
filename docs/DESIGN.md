@@ -58,7 +58,11 @@ The model sees a short **sentinel** in place of an offloaded run:
 
 ## 3. Compression pipeline
 
-1. **Detect content type** — `Json`, `Log`, or `Text`. Text is passed through verbatim.
+1. **Detect content type** — `Json`, `Log`, or `Text`. Text passes through verbatim at Stage 0;
+   under an **explicit budget** it partitions into physical lines like a log (a single unbroken
+   line approaches the budget via whole-input offload instead) — for an oversized diff, file dump,
+   or prose blob, "the model reads it whole" is no longer an option, and reversibility is
+   structural either way.
 2. **Partition into units** — JSON: top-level array elements; logs: lines (detected by a high proportion
    of timestamp/bracket-prefixed lines, or low first-token diversity).
 3. **Window** — keep a head+tail window of whole units so the start *and* end of the payload survive; the
@@ -157,7 +161,10 @@ side is recoverable on the other.
   (`COFFER_PROXY_REDUCTION`, default 0.8) but never keep more than an absolute ceiling
   (`COFFER_PROXY_MAX_KEPT_TOKENS`, default 4000 heuristic tokens; 0 disables) — proportional reduction
   alone has an unbounded remainder (a ~915k-token block would still keep ~183k at 0.8), so the ceiling
-  makes the kept size scale-invariant on exactly the oversized results that motivate the rewrite. Every rewritten block leads with a one-line **sentinel explainer** — the model
+  makes the kept size scale-invariant on exactly the oversized results that motivate the rewrite.
+  Plain-text blocks (prose, code, diffs, file dumps) keep a stronger restraint: they are rewritten
+  only once they exceed the ceiling — below it the model reads them whole — and then with pure
+  ceiling semantics, no proportional cut. Every rewritten block leads with a one-line **sentinel explainer** — the model
   only ever learns about coffer in-band, inside tool output, so this line is what keeps a `<<cof:…>>`
   marker from reading as truncation or corruption: it states that elided bytes are preserved and
   recoverable, how to query them exactly when coffer tools are registered, and that elided content must
