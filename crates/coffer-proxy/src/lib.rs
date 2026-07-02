@@ -22,6 +22,38 @@ const MESSAGES_TOOL_RESULT_MARKER: &[u8] = b"tool_result";
 const RESPONSES_CALL_OUTPUT_MARKER: &[u8] = b"_call_output";
 const OLLAMA_TOOL_MARKER: &[u8] = b"\"tool\"";
 
+/// What the model reads at the top of a rewritten tool-output block, so a `<<cof:…>>`
+/// sentinel is never mistaken for truncation, corruption, or "weird log noise". The model
+/// only ever learns about coffer in-band, inside tool output — authored system/user/
+/// assistant text is never touched — so this line IS the awareness mechanism: it says what
+/// the markers mean, that nothing is lost, how to query exactly when coffer tools are
+/// registered, and (crucially) not to guess elided content when they are not.
+pub const SENTINEL_EXPLAINER: &str = "[coffer] Long runs in this tool result were elided to save context. A marker like \
+     <<cof:HASH +N items>> stands for N elided items whose exact bytes are preserved \
+     server-side — this is NOT truncation or corruption, and elided content must never be \
+     guessed. If coffer_* tools are available, they answer questions over the FULL data \
+     exactly (use the marker's HASH as the handle); otherwise rely only on the visible rows \
+     and the marker counts.\n";
+
+/// How the tool-output rewrite behaves. `From<usize>` keeps the common "just a
+/// min-compress threshold" call shape working, with the explainer on (the default).
+#[derive(Clone, Copy, Debug)]
+pub struct RewriteOptions {
+    /// Bodies (and per-block text) below this many bytes pass through untouched.
+    pub min_compress: usize,
+    /// Prepend [`SENTINEL_EXPLAINER`] to every rewritten block (`COFFER_PROXY_EXPLAIN`).
+    pub explain: bool,
+}
+
+impl From<usize> for RewriteOptions {
+    fn from(min_compress: usize) -> Self {
+        Self {
+            min_compress,
+            explain: true,
+        }
+    }
+}
+
 /// Compress every `tool_result` block's text in an Anthropic Messages request `body`, offloading the
 /// elided bytes into `cas`. `tool_result` text below `min_compress` bytes is left as-is. Returns the
 /// original body unchanged if it is below the compression threshold, is not the expected JSON
@@ -43,8 +75,12 @@ pub enum TransformKind {
 }
 
 #[must_use]
-pub fn compress_request_body(body: &[u8], cas: &dyn Cas, min_compress: usize) -> Vec<u8> {
-    compress_request_body_kind(body, cas, min_compress).0
+pub fn compress_request_body(
+    body: &[u8],
+    cas: &dyn Cas,
+    opts: impl Into<RewriteOptions>,
+) -> Vec<u8> {
+    compress_request_body_kind(body, cas, opts).0
 }
 
 /// Like [`compress_request_body`], also returning WHY the body was/wasn't changed (see
@@ -53,10 +89,11 @@ pub fn compress_request_body(body: &[u8], cas: &dyn Cas, min_compress: usize) ->
 pub fn compress_request_body_kind(
     body: &[u8],
     cas: &dyn Cas,
-    min_compress: usize,
+    opts: impl Into<RewriteOptions>,
 ) -> (Vec<u8>, TransformKind) {
     use TransformKind::{Compressed, NoShrink, Passthrough};
-    if body.len() < min_compress {
+    let opts = opts.into();
+    if body.len() < opts.min_compress {
         return (body.to_vec(), Passthrough);
     }
     if !contains_bytes(body, MESSAGES_TOOL_RESULT_MARKER) {
@@ -80,13 +117,13 @@ pub fn compress_request_body_kind(
             }
             match block.get_mut("content") {
                 // tool_result content is a bare string …
-                Some(Value::String(s)) => changed |= squash(s, &counter, cas, min_compress),
+                Some(Value::String(s)) => changed |= squash(s, &counter, cas, opts),
                 // … or an array of content blocks; compress only the text ones.
                 Some(Value::Array(arr)) => {
                     for c in arr.iter_mut() {
                         if c.get("type").and_then(Value::as_str) == Some("text") {
                             if let Some(Value::String(t)) = c.get_mut("text") {
-                                changed |= squash(t, &counter, cas, min_compress);
+                                changed |= squash(t, &counter, cas, opts);
                             }
                         }
                     }
@@ -113,8 +150,12 @@ pub fn compress_request_body_kind(
 /// that is below the compression threshold, is not the expected shape, or has no shrinking output
 /// is returned byte-for-byte unchanged. Offloaded bytes go into `cas` for unfold.
 #[must_use]
-pub fn compress_responses_body(body: &[u8], cas: &dyn Cas, min_compress: usize) -> Vec<u8> {
-    compress_responses_body_kind(body, cas, min_compress).0
+pub fn compress_responses_body(
+    body: &[u8],
+    cas: &dyn Cas,
+    opts: impl Into<RewriteOptions>,
+) -> Vec<u8> {
+    compress_responses_body_kind(body, cas, opts).0
 }
 
 /// Like [`compress_responses_body`], also returning WHY the body was/wasn't changed (see
@@ -123,10 +164,11 @@ pub fn compress_responses_body(body: &[u8], cas: &dyn Cas, min_compress: usize) 
 pub fn compress_responses_body_kind(
     body: &[u8],
     cas: &dyn Cas,
-    min_compress: usize,
+    opts: impl Into<RewriteOptions>,
 ) -> (Vec<u8>, TransformKind) {
     use TransformKind::{Compressed, NoShrink, Passthrough};
-    if body.len() < min_compress {
+    let opts = opts.into();
+    if body.len() < opts.min_compress {
         return (body.to_vec(), Passthrough);
     }
     if !contains_bytes(body, RESPONSES_CALL_OUTPUT_MARKER) {
@@ -149,11 +191,11 @@ pub fn compress_responses_body_kind(
             continue;
         }
         match item.get_mut("output") {
-            Some(Value::String(s)) => changed |= squash(s, &counter, cas, min_compress),
+            Some(Value::String(s)) => changed |= squash(s, &counter, cas, opts),
             Some(Value::Array(arr)) => {
                 for c in arr.iter_mut() {
                     if let Some(Value::String(t)) = c.get_mut("text") {
-                        changed |= squash(t, &counter, cas, min_compress);
+                        changed |= squash(t, &counter, cas, opts);
                     }
                 }
             }
@@ -176,8 +218,12 @@ pub fn compress_responses_body_kind(
 /// transforms. Bedrock and OpenRouter need no new transform — they use the
 /// Anthropic Messages / OpenAI Responses shapes already handled, so they fan out by upstream routing.
 #[must_use]
-pub fn compress_ollama_body(body: &[u8], cas: &dyn Cas, min_compress: usize) -> Vec<u8> {
-    compress_ollama_body_kind(body, cas, min_compress).0
+pub fn compress_ollama_body(
+    body: &[u8],
+    cas: &dyn Cas,
+    opts: impl Into<RewriteOptions>,
+) -> Vec<u8> {
+    compress_ollama_body_kind(body, cas, opts).0
 }
 
 /// Like [`compress_ollama_body`], also returning WHY the body was/wasn't changed ([`TransformKind`]).
@@ -185,10 +231,11 @@ pub fn compress_ollama_body(body: &[u8], cas: &dyn Cas, min_compress: usize) -> 
 pub fn compress_ollama_body_kind(
     body: &[u8],
     cas: &dyn Cas,
-    min_compress: usize,
+    opts: impl Into<RewriteOptions>,
 ) -> (Vec<u8>, TransformKind) {
     use TransformKind::{Compressed, NoShrink, Passthrough};
-    if body.len() < min_compress {
+    let opts = opts.into();
+    if body.len() < opts.min_compress {
         return (body.to_vec(), Passthrough);
     }
     if !contains_bytes(body, OLLAMA_TOOL_MARKER) {
@@ -207,7 +254,7 @@ pub fn compress_ollama_body_kind(
             continue;
         }
         if let Some(Value::String(s)) = m.get_mut("content") {
-            changed |= squash(s, &counter, cas, min_compress);
+            changed |= squash(s, &counter, cas, opts);
         }
     }
     if !changed {
@@ -244,9 +291,9 @@ fn squash(
     text: &mut String,
     counter: &HeuristicCounter,
     cas: &dyn Cas,
-    min_compress: usize,
+    opts: RewriteOptions,
 ) -> bool {
-    if text.len() < min_compress {
+    if text.len() < opts.min_compress {
         return false;
     }
     let Ok(doc) = Compressor::new()
@@ -258,8 +305,23 @@ fn squash(
         return false;
     };
     let rendered = doc.render_for_model();
-    if rendered.len() < text.len() {
-        *text = rendered;
+    // The shrink gate counts the explainer too: the rewrite must never GROW the block.
+    // A smaller render implies at least one elided run (a verbatim-only render equals the
+    // original text), so the explainer never appears without a sentinel to explain.
+    let total = if opts.explain {
+        SENTINEL_EXPLAINER.len() + rendered.len()
+    } else {
+        rendered.len()
+    };
+    if total < text.len() {
+        *text = if opts.explain {
+            let mut out = String::with_capacity(total);
+            out.push_str(SENTINEL_EXPLAINER);
+            out.push_str(&rendered);
+            out
+        } else {
+            rendered
+        };
         true
     } else {
         false
@@ -294,6 +356,41 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn explainer_present_by_default_and_absent_when_disabled() {
+        let cas = MemoryCas::new();
+        let big = big_json_array();
+
+        let on = tool_result_text(&compress_request_body(
+            &request_with_tool_result(&big),
+            &cas,
+            1024,
+        ));
+        assert!(
+            on.starts_with(SENTINEL_EXPLAINER),
+            "default rewrite must lead with the in-band explainer"
+        );
+
+        let off = tool_result_text(&compress_request_body(
+            &request_with_tool_result(&big),
+            &cas,
+            RewriteOptions {
+                min_compress: 1024,
+                explain: false,
+            },
+        ));
+        assert!(
+            !off.contains("[coffer]"),
+            "explain=false must omit the explainer"
+        );
+        assert!(off.contains("<<cof:"), "the render itself is unchanged");
+        assert_eq!(
+            on.strip_prefix(SENTINEL_EXPLAINER).unwrap(),
+            off,
+            "the explainer is a pure prefix — the render is identical either way"
+        );
     }
 
     fn request_with_tool_result(tool_text: &str) -> Vec<u8> {
@@ -349,6 +446,14 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    /// Rewritten blocks carry the in-band explainer; the reversible-splice checks below
+    /// operate on the render that follows it (stripping doubles as the presence assert).
+    fn strip_explainer(rendered: &str) -> &str {
+        rendered
+            .strip_prefix(SENTINEL_EXPLAINER)
+            .expect("rewritten block must start with the sentinel explainer")
     }
 
     fn sentinel_span(rendered: &str) -> std::ops::Range<usize> {
@@ -490,6 +595,7 @@ mod tests {
         cas.flush();
 
         let rendered = tool_result_text(&out);
+        let rendered = strip_explainer(&rendered).to_string();
         let span = sentinel_span(&rendered);
         let hash = sentinel_hash(&rendered[span.clone()]);
         let recovered = read_blob(dir.db(), hash).unwrap().unwrap();
@@ -529,6 +635,7 @@ mod tests {
             "status tail summary survives"
         );
 
+        let rendered = strip_explainer(&rendered).to_string();
         let span = sentinel_span(&rendered);
         let hash = sentinel_hash(&rendered[span.clone()]);
         let recovered = read_blob(dir.db(), hash).unwrap().unwrap();
@@ -638,6 +745,7 @@ mod tests {
 
         let v: Value = serde_json::from_slice(&out).unwrap();
         let rendered = v["messages"][1]["content"].as_str().unwrap().to_string();
+        let rendered = strip_explainer(&rendered).to_string();
         let span = sentinel_span(&rendered);
         let hash = sentinel_hash(&rendered[span.clone()]);
         let recovered = read_blob(dir.db(), hash).unwrap().unwrap();

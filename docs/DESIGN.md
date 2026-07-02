@@ -153,8 +153,13 @@ side is recoverable on the other.
   is already compact round-trips byte-for-byte, while a pretty-printed or `\u`-escaped sender is normalized
   to compact form (semantically identical, not byte-identical). When nothing compresses, the original bytes
   are forwarded verbatim. The transform is **fail-open**: any unexpected body shape or error forwards the
-  original bytes unchanged. (A byte-exact span patcher that rewrites only the tool-output byte ranges is a
-  deferred option.)
+  original bytes unchanged. Every rewritten block leads with a one-line **sentinel explainer** — the model
+  only ever learns about coffer in-band, inside tool output, so this line is what keeps a `<<cof:…>>`
+  marker from reading as truncation or corruption: it states that elided bytes are preserved and
+  recoverable, how to query them exactly when coffer tools are registered, and that elided content must
+  never be guessed (`COFFER_PROXY_EXPLAIN=0` disables it; the shrink gate counts the explainer, so a
+  rewrite never grows a block). (A byte-exact span patcher that rewrites only the tool-output byte ranges
+  is a deferred option.)
 - **MCP server.** Tools to direct at server-held output instead of reading it: `coffer_digest` (exact
   aggregates from a natural-language ask), `coffer_describe` (a shape-generic exact summary of any record
   set — row count, per-field stats, count-by-value — with no per-tool/per-format code, the lossless

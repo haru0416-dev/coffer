@@ -171,6 +171,12 @@ async fn proxy_binary_writes_shared_cas_recoverable_from_another_process() {
     assert_eq!(response.status(), StatusCode::OK);
     let forwarded = rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let rendered = tool_result_text(&forwarded);
+    // The rewritten block carries the in-band sentinel explainer; the reversible splice
+    // applies to the render that follows it (stripping doubles as the presence assert).
+    let rendered = rendered
+        .strip_prefix(coffer_proxy::SENTINEL_EXPLAINER)
+        .expect("rewritten block must start with the sentinel explainer")
+        .to_string();
     let span = sentinel_span(&rendered);
     let hash = sentinel_hash(&rendered[span.clone()]);
     let recovered = read_blob(&db, hash).unwrap().unwrap();

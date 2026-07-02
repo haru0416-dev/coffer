@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use coffer_cas::{Cas, MemoryCas, SqliteCas, SqliteConfig};
 use coffer_proxy::{
-    TransformKind, compress_ollama_body_kind, compress_request_body_kind,
+    RewriteOptions, TransformKind, compress_ollama_body_kind, compress_request_body_kind,
     compress_responses_body_kind,
 };
 use futures_util::StreamExt;
@@ -110,6 +110,9 @@ impl Store {
 struct Config {
     upstream: String,
     min: usize,
+    /// Prepend the in-band sentinel explainer to every rewritten block
+    /// (`COFFER_PROXY_EXPLAIN`, default on; set 0/false to disable).
+    explain: bool,
     max_body_bytes: usize,
     store: Store,
     client: reqwest::Client,
@@ -318,6 +321,10 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1024);
+    let explain = !matches!(
+        std::env::var("COFFER_PROXY_EXPLAIN").ok().as_deref(),
+        Some("0" | "false" | "off")
+    );
     let max_body_bytes = proxy_max_body_bytes_from_env();
 
     let store = match std::env::var("COFFER_CAS_DB") {
@@ -364,6 +371,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Arc::new(Config {
         upstream,
         min,
+        explain,
         max_body_bytes,
         store,
         client,
@@ -899,14 +907,18 @@ fn sqlite_checkpoint_every_blobs_from_value(raw: Option<&str>) -> Option<usize> 
 /// `COFFER_PROXY_DEBUG`) log a content-free structural summary.
 /// One of the two body transforms: returns the (possibly unchanged) bytes and why (see
 /// [`TransformKind`]).
-type TransformFn = fn(&[u8], &dyn Cas, usize) -> (Vec<u8>, TransformKind);
+type TransformFn = fn(&[u8], &dyn Cas, RewriteOptions) -> (Vec<u8>, TransformKind);
 
 fn compress_then_flush(
     body: &[u8],
     cfg: &Config,
     transform: TransformFn,
 ) -> (Vec<u8>, TransformKind) {
-    let (out, kind) = transform(body, cfg.store.as_cas(), cfg.min);
+    let opts = RewriteOptions {
+        min_compress: cfg.min,
+        explain: cfg.explain,
+    };
+    let (out, kind) = transform(body, cfg.store.as_cas(), opts);
     cfg.store.flush();
     if std::env::var_os("COFFER_PROXY_DEBUG").is_some() {
         eprintln!(
@@ -1122,6 +1134,7 @@ mod tests {
         let cfg = Arc::new(super::Config {
             upstream,
             min: 1024,
+            explain: true,
             max_body_bytes,
             store: super::Store::Memory(coffer_cas::MemoryCas::new()),
             client: reqwest::Client::new(),
