@@ -20,7 +20,16 @@ pub enum ContentType {
 /// reversibility invariant — only an effectiveness gap on pathologically deep documents.
 #[must_use]
 pub fn detect(input: &[u8]) -> ContentType {
-    detect_with_value(input).0
+    if starts_like_json_container(input)
+        && serde_json::from_slice::<serde::de::IgnoredAny>(input).is_ok()
+    {
+        // A document whose first non-whitespace byte is '[' or '{' and that parses as JSON is
+        // necessarily a container, so syntax validation alone classifies it — no `Value` is
+        // materialized. `detect_with_value` keeps the materializing parse for callers that
+        // need the parsed document itself.
+        return ContentType::Json;
+    }
+    classify_non_json(input)
 }
 
 /// Like [`detect`], but also returns the parsed JSON value for a JSON container, so a caller
@@ -28,24 +37,35 @@ pub fn detect(input: &[u8]) -> ContentType {
 /// bytes only once. The value is `None` for `Log`/`Text` — and for JSON scalars, which
 /// classify as `Text`.
 pub(crate) fn detect_with_value(input: &[u8]) -> (ContentType, Option<serde_json::Value>) {
-    let first_non_ws = input
-        .iter()
-        .copied()
-        .find(|byte| !byte.is_ascii_whitespace());
-    if matches!(first_non_ws, Some(b'[' | b'{')) {
+    if starts_like_json_container(input) {
         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(input) {
             if value.is_array() || value.is_object() {
                 return (ContentType::Json, Some(value));
             }
         }
     }
+    (classify_non_json(input), None)
+}
+
+/// First non-whitespace byte is `[` or `{` — the precondition under which "parses as JSON"
+/// implies "is a JSON container" (a scalar cannot start with either byte).
+fn starts_like_json_container(input: &[u8]) -> bool {
+    let first_non_ws = input
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace());
+    matches!(first_non_ws, Some(b'[' | b'{'))
+}
+
+/// The non-JSON half of the classifier: log heuristics, else text.
+fn classify_non_json(input: &[u8]) -> ContentType {
     if let Ok(text) = std::str::from_utf8(input) {
         let lines: Vec<&str> = text.lines().collect();
         if looks_like_log(&lines) || looks_like_git_status(&lines) {
-            return (ContentType::Log, None);
+            return ContentType::Log;
         }
     }
-    (ContentType::Text, None)
+    ContentType::Text
 }
 
 /// Heuristic for line-oriented, **samplable bulk** output — the classes a head+tail window

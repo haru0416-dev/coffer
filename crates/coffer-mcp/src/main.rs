@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use coffer_cas::{Cas, ContentHash, SqliteCas, SqliteConfig};
+use coffer_core::dataset::DatasetCache;
 use coffer_core::{
-    Agg, ContentType, Op, Predicate, compress_json_where, compress_structural_code_to_budget,
-    describe, detect, digest, query_aggregate, query_subset,
+    Agg, ContentType, Dataset, Op, Predicate, compress_json_where,
+    compress_structural_code_to_budget, detect, query_subset,
 };
 use coffer_tokenizer::{HeuristicCounter, TokenCounter};
 use rmcp::handler::server::wrapper::Parameters;
@@ -77,6 +78,9 @@ enum HandleStore {
 #[derive(Clone)]
 struct Coffer {
     store: Arc<HandleStore>,
+    /// Parsed-dataset LRU: N query tools against one held handle parse its bytes once.
+    /// Sound because handles are content-addressed (bytes never change under a key).
+    datasets: Arc<DatasetCache>,
 }
 
 impl Coffer {
@@ -90,6 +94,7 @@ impl Coffer {
     fn in_memory() -> Self {
         Self {
             store: Arc::new(HandleStore::Memory(Mutex::new(HashMap::new()))),
+            datasets: Arc::new(DatasetCache::new(dataset_cache_entries_from_env())),
         }
     }
 
@@ -122,7 +127,14 @@ impl Coffer {
                 resident_cap_bytes,
                 checkpoint_every_blobs,
             }),
+            datasets: Arc::new(DatasetCache::new(dataset_cache_entries_from_env())),
         })
+    }
+
+    /// The parsed dataset for a handle's bytes (cache hit or parse) — `None` iff the bytes
+    /// are not a top-level JSON array, exactly like the byte-slice query entry points.
+    fn dataset(&self, key: &str, bytes: &[u8]) -> Option<Arc<Dataset>> {
+        self.datasets.get_or_parse(key, bytes)
     }
 
     fn put_bytes(&self, bytes: &[u8]) -> ContentHash {
@@ -306,6 +318,16 @@ fn retrieve_limits_from_env() -> RetrieveLimits {
 fn max_rows_from_env() -> usize {
     positive_usize_from_value(std::env::var("COFFER_MCP_MAX_ROWS").ok().as_deref())
         .unwrap_or(DEFAULT_MAX_ROWS)
+}
+
+/// How many parsed datasets the query tools keep hot (`COFFER_MCP_DATASET_CACHE_ENTRIES`,
+/// default 8; 0 disables retention — every query parses fresh). Read once at startup: the
+/// cache lives for the process, unlike the per-call limits above.
+fn dataset_cache_entries_from_env() -> usize {
+    std::env::var("COFFER_MCP_DATASET_CACHE_ENTRIES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(8)
 }
 
 fn retrieve_limits_from_values(default_raw: Option<&str>, max_raw: Option<&str>) -> RetrieveLimits {
@@ -1087,7 +1109,10 @@ impl Coffer {
         let Some(bytes) = self.get_handle(&a.handle) else {
             return Ok(unknown_handle());
         };
-        match digest(&bytes, &a.query) {
+        match self
+            .dataset(&a.handle, &bytes)
+            .and_then(|ds| ds.digest(&a.query))
+        {
             Some(fact) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "{fact}  (computed exactly over the whole dataset)"
             ))])),
@@ -1113,7 +1138,7 @@ impl Coffer {
         let Some(bytes) = self.get_handle(&a.handle) else {
             return Ok(unknown_handle());
         };
-        match describe(&bytes) {
+        match self.dataset(&a.handle, &bytes).and_then(|ds| ds.describe()) {
             Some(card) => Ok(CallToolResult::success(vec![Content::text(card)])),
             None => Ok(CallToolResult::error(vec![Content::text(
                 "coffer_describe needs a handle over a JSON array of records",
@@ -1197,7 +1222,10 @@ impl Coffer {
             )]));
         };
         let predicates = predicates_from_args(&a.predicates);
-        match query_aggregate(&bytes, &predicates, &agg) {
+        match self
+            .dataset(&a.handle, &bytes)
+            .and_then(|ds| ds.query_aggregate(&predicates, &agg))
+        {
             Some(r) => {
                 const SHOWN: usize = 64;
                 let idx = if r.matched.len() <= SHOWN {
@@ -1240,7 +1268,10 @@ impl Coffer {
                 "agg must be count|sum|mean|min|max, and sum/mean/min/max require value_field",
             )]));
         };
-        match coffer_core::bucket_aggregate(&bytes, &a.field, a.width, &agg) {
+        match self
+            .dataset(&a.handle, &bytes)
+            .and_then(|ds| ds.bucket_aggregate(&a.field, a.width, &agg))
+        {
             Some(g) => Ok(CallToolResult::success(vec![Content::text(
                 group_aggregate_text(&g),
             )])),
@@ -1302,10 +1333,15 @@ impl Coffer {
                 "agg must be count|sum|mean|min|max, and sum/mean/min/max require a field",
             )]));
         };
+        let joined = (self.dataset(&a.left, &left), self.dataset(&a.right, &right));
+        let (Some(lds), Some(rds)) = joined else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "no exact join: both handles must be JSON arrays",
+            )]));
+        };
         if let Some(group_field) = a.group_by.as_deref().filter(|g| !g.is_empty()) {
-            return match coffer_core::join_group_aggregate(
-                &left,
-                &right,
+            return match lds.join_group_aggregate(
+                &rds,
                 &a.left_key,
                 &a.right_key,
                 group_field,
@@ -1320,14 +1356,7 @@ impl Coffer {
             };
         }
         let right_where = predicates_from_args(&a.right_where);
-        match coffer_core::join_aggregate(
-            &left,
-            &right,
-            &a.left_key,
-            &a.right_key,
-            &right_where,
-            &agg,
-        ) {
+        match lds.join_aggregate(&rds, &a.left_key, &a.right_key, &right_where, &agg) {
             Some(r) => {
                 const SHOWN: usize = 64;
                 let idx = if r.matched.len() <= SHOWN {
@@ -1369,7 +1398,10 @@ impl Coffer {
             )]));
         };
         let predicates = predicates_from_args(&a.predicates);
-        match query_aggregate(&bytes, &predicates, &agg) {
+        match self
+            .dataset(&a.handle, &bytes)
+            .and_then(|ds| ds.query_aggregate(&predicates, &agg))
+        {
             Some(r) => {
                 let agree = (r.value - a.expected).abs() <= 1e-9 + 1e-9 * r.value.abs();
                 const SHOWN: usize = 64;

@@ -446,9 +446,32 @@ fn digest_count(arr: &[Value], q: &str, n: usize) -> Option<String> {
 /// JSON array containing at least one object.
 #[must_use]
 pub fn describe(input: &[u8]) -> Option<String> {
-    const MAX_CATEGORICAL: usize = 12;
     let v: Value = serde_json::from_slice(input).ok()?;
     let arr = v.as_array()?;
+    describe_rows(arr)
+}
+
+/// `Value::to_string()` with allocation fast paths for the two shapes that dominate real record
+/// sets (plain strings and numbers). Output is byte-identical to `to_string()`: `serde_json` escapes
+/// only `"`, `\` and control bytes (< 0x20) — non-ASCII passes through raw — so a string with none
+/// of those serializes as exactly `"<s>"`; a `Number`'s `Display` prints its canonical JSON text.
+fn canonical_text(val: &Value) -> String {
+    match val {
+        Value::String(s) if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') => {
+            let mut out = String::with_capacity(s.len() + 2);
+            out.push('"');
+            out.push_str(s);
+            out.push('"');
+            out
+        }
+        Value::Number(n) => n.to_string(),
+        _ => val.to_string(),
+    }
+}
+
+/// [`describe`] over already-parsed records — the parse-once path used by [`crate::Dataset`].
+pub(crate) fn describe_rows(arr: &[Value]) -> Option<String> {
+    const MAX_CATEGORICAL: usize = 12;
     let n = arr.len();
     if n == 0 {
         return Some("[describe] 0 records".to_string());
@@ -470,13 +493,14 @@ pub fn describe(input: &[u8]) -> Option<String> {
     }
     let mut lines = vec![format!("[describe] {n} records, {} fields", fields.len())];
     for f in &fields {
-        // count-by canonical JSON text over present, non-null values
-        let mut counts: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
+        // count-by canonical JSON text over present, non-null values. A HashMap is safe here:
+        // the only order-sensitive consumer (the categorical breakdown) re-sorts by
+        // (count desc, key asc), and the other consumers use only sums/lengths.
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for rec in arr {
             if let Some(val) = rec.as_object().and_then(|o| o.get(f)) {
                 if !val.is_null() {
-                    *counts.entry(val.to_string()).or_default() += 1;
+                    *counts.entry(canonical_text(val)).or_default() += 1;
                 }
             }
         }
@@ -520,9 +544,14 @@ pub fn describe(input: &[u8]) -> Option<String> {
 /// silently picking one — there is no unique answer to invent.
 #[must_use]
 pub fn digest(input: &[u8], query: &str) -> Option<String> {
-    let q = query.to_ascii_lowercase();
     let v: Value = serde_json::from_slice(input).ok()?;
     let arr = v.as_array()?;
+    digest_rows(arr, query)
+}
+
+/// [`digest`] over already-parsed records — the parse-once path used by [`crate::Dataset`].
+pub(crate) fn digest_rows(arr: &[Value], query: &str) -> Option<String> {
+    let q = query.to_ascii_lowercase();
     if arr.is_empty() {
         return None;
     }
@@ -805,7 +834,21 @@ pub fn query_aggregate(input: &[u8], predicates: &[Predicate], agg: &Agg) -> Opt
         .collect();
 
     let value = apply_agg(arr, &matched, agg)?;
+    Some(QueryResult {
+        display: query_display(predicates, agg, matched.len(), value),
+        value,
+        matched,
+    })
+}
 
+/// The one-line, model-facing summary of a query-aggregate — shared with [`crate::Dataset`]'s
+/// column-accelerated path so both produce byte-identical display strings.
+pub(crate) fn query_display(
+    predicates: &[Predicate],
+    agg: &Agg,
+    matched_len: usize,
+    value: f64,
+) -> String {
     let whr = if predicates.is_empty() {
         String::new()
     } else {
@@ -815,16 +858,10 @@ pub fn query_aggregate(input: &[u8], predicates: &[Predicate], agg: &Agg) -> Opt
             .collect();
         format!(" where {}", clauses.join(" AND "))
     };
-    let display = format!(
-        "[index] {}{whr} over {} matched records = {value}",
+    format!(
+        "[index] {}{whr} over {matched_len} matched records = {value}",
         agg_label(agg),
-        matched.len()
-    );
-    Some(QueryResult {
-        display,
-        value,
-        matched,
-    })
+    )
 }
 
 /// Cross-handle semi-join aggregate: aggregate over the records of a LEFT JSON array that
@@ -849,7 +886,18 @@ pub fn join_aggregate(
     let larr = lv.as_array()?;
     let rv: Value = serde_json::from_slice(right).ok()?;
     let rarr = rv.as_array()?;
+    join_aggregate_rows(larr, rarr, left_key, right_key, right_where, agg)
+}
 
+/// [`join_aggregate`] over already-parsed records — the parse-once path used by [`crate::Dataset`].
+pub(crate) fn join_aggregate_rows(
+    larr: &[Value],
+    rarr: &[Value],
+    left_key: &str,
+    right_key: &str,
+    right_where: &[Predicate],
+    agg: &Agg,
+) -> Option<QueryResult> {
     // Canonical join keys of the right records that pass ALL right predicates. `to_string` canonicalizes
     // a scalar to its JSON text, so two equal scalars collapse to one key and equality stays type-aware.
     let mut allowed: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -948,7 +996,19 @@ pub fn join_group_aggregate(
     let larr = lv.as_array()?;
     let rv: Value = serde_json::from_slice(right).ok()?;
     let rarr = rv.as_array()?;
+    join_group_aggregate_rows(larr, rarr, left_key, right_key, group_field, agg)
+}
 
+/// [`join_group_aggregate`] over already-parsed records — the parse-once path used by
+/// [`crate::Dataset`].
+pub(crate) fn join_group_aggregate_rows(
+    larr: &[Value],
+    rarr: &[Value],
+    left_key: &str,
+    right_key: &str,
+    group_field: &str,
+    agg: &Agg,
+) -> Option<GroupAggregate> {
     // right join-key -> group value (canonical JSON text). A key mapping to two DIFFERENT group values
     // is ambiguous: refuse rather than pick one.
     let mut key_to_group: std::collections::HashMap<String, String> =
@@ -1000,12 +1060,22 @@ pub fn bucket_aggregate(
     width: f64,
     agg: &Agg,
 ) -> Option<GroupAggregate> {
+    let v: Value = serde_json::from_slice(input).ok()?;
+    let arr = v.as_array()?;
+    bucket_aggregate_rows(arr, bucket_field, width, agg)
+}
+
+/// [`bucket_aggregate`] over already-parsed records — the parse-once path used by
+/// [`crate::Dataset`].
+pub(crate) fn bucket_aggregate_rows(
+    arr: &[Value],
+    bucket_field: &str,
+    width: f64,
+    agg: &Agg,
+) -> Option<GroupAggregate> {
     if !width.is_finite() || width <= 0.0 {
         return None;
     }
-    let v: Value = serde_json::from_slice(input).ok()?;
-    let arr = v.as_array()?;
-
     let mut groups: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
     for (i, rec) in arr.iter().enumerate() {

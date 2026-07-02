@@ -28,7 +28,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use coffer_cas::{Cas, ContentHash, MemoryCas, SqliteCas};
-use coffer_core::{Agg, Op, Predicate, describe, digest, query_aggregate};
+use coffer_core::dataset::DatasetCache;
+use coffer_core::{Agg, Op, Predicate};
 use coffer_tokenizer::{HeuristicCounter, TokenCounter};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -151,6 +152,9 @@ struct RelayState {
     /// collision-resolved names on every final `tools/list` page.
     names: Mutex<Vec<(ToolKind, String)>>,
     store: HandleStore,
+    /// Parsed-dataset LRU keyed by handle: the offload's fact card pre-warms it, so the
+    /// first follow-up query already skips the parse. Sound: handles are content-addressed.
+    datasets: DatasetCache,
     cfg: WrapConfig,
 }
 
@@ -164,6 +168,7 @@ impl RelayState {
             pending: Mutex::new(HashMap::new()),
             names: Mutex::new(names),
             store,
+            datasets: DatasetCache::new(4),
             cfg,
         }
     }
@@ -538,7 +543,13 @@ fn offload_large_content(msg: &mut Value, state: &RelayState) {
             handle = %hash.short(),
             "offloaded oversized tool result block"
         );
-        let card = fact_card(text, tokens, &hash, &state.cfg, &usage);
+        // Parsing for the fact card doubles as pre-warming the dataset cache: the first
+        // follow-up query against this handle skips its parse entirely.
+        let described = state
+            .datasets
+            .get_or_parse(hash.as_str(), text.as_bytes())
+            .and_then(|ds| ds.describe());
+        let card = fact_card(text, tokens, &hash, described, &state.cfg, &usage);
         if let Some(obj) = block.as_object_mut() {
             obj.insert("text".to_string(), Value::String(card));
         }
@@ -549,6 +560,7 @@ fn fact_card(
     text: &str,
     est_tokens: usize,
     hash: &ContentHash,
+    described: Option<String>,
     cfg: &WrapConfig,
     usage: &str,
 ) -> String {
@@ -560,7 +572,7 @@ fn fact_card(
         cfg.threshold_tokens,
         hash.as_str()
     );
-    if let Some(described) = describe(bytes) {
+    if let Some(described) = described {
         card.push_str(&clip_chars(&described, 1200));
         card.push('\n');
     } else {
@@ -623,25 +635,24 @@ fn error_result(msg: &str) -> Value {
 }
 
 fn handle_injected(kind: ToolKind, args: &Value, state: &RelayState) -> Value {
-    let bytes = match resolve_bytes(args, state) {
+    let Some(handle) = args.get("handle").and_then(Value::as_str) else {
+        return error_result("missing required argument: handle");
+    };
+    let bytes = match resolve_bytes(handle, state) {
         Ok(b) => b,
         Err(e) => return error_result(&e),
     };
     match kind {
-        ToolKind::Describe => handle_describe(&bytes),
-        ToolKind::Digest => handle_digest(&bytes, args, state),
-        ToolKind::Aggregate => handle_aggregate(&bytes, args),
+        ToolKind::Describe => handle_describe(state, handle, &bytes),
+        ToolKind::Digest => handle_digest(state, handle, &bytes, args),
+        ToolKind::Aggregate => handle_aggregate(state, handle, &bytes, args),
         ToolKind::Search => handle_search(&bytes, args),
         ToolKind::Lines => handle_lines(&bytes, args),
         ToolKind::Retrieve => handle_retrieve(&bytes, args, &state.cfg),
     }
 }
 
-fn resolve_bytes(args: &Value, state: &RelayState) -> Result<Arc<[u8]>, String> {
-    let handle = args
-        .get("handle")
-        .and_then(Value::as_str)
-        .ok_or("missing required argument: handle")?;
+fn resolve_bytes(handle: &str, state: &RelayState) -> Result<Arc<[u8]>, String> {
     let hash = ContentHash::from_hex(handle)
         .ok_or_else(|| format!("invalid handle (expected 64-hex SHA-256): {handle}"))?;
     state
@@ -650,8 +661,12 @@ fn resolve_bytes(args: &Value, state: &RelayState) -> Result<Arc<[u8]>, String> 
         .ok_or_else(|| format!("unknown handle (not in this store, or evicted): {handle}"))
 }
 
-fn handle_describe(bytes: &[u8]) -> Value {
-    match describe(bytes) {
+fn handle_describe(state: &RelayState, handle: &str, bytes: &[u8]) -> Value {
+    match state
+        .datasets
+        .get_or_parse(handle, bytes)
+        .and_then(|ds| ds.describe())
+    {
         Some(card) => ok_result(card),
         None => ok_result(format!(
             "not a JSON array of objects; {}no field stats available. {}",
@@ -661,11 +676,15 @@ fn handle_describe(bytes: &[u8]) -> Value {
     }
 }
 
-fn handle_digest(bytes: &[u8], args: &Value, state: &RelayState) -> Value {
+fn handle_digest(state: &RelayState, handle: &str, bytes: &[u8], args: &Value) -> Value {
     let Some(query) = args.get("query").and_then(Value::as_str) else {
         return error_result("missing required argument: query");
     };
-    match digest(bytes, query) {
+    match state
+        .datasets
+        .get_or_parse(handle, bytes)
+        .and_then(|ds| ds.digest(query))
+    {
         Some(answer) => ok_result(answer),
         None => ok_result(format!(
             "digest refused: no exact answer for this query over this data \
@@ -747,7 +766,7 @@ fn parse_agg(args: &Value) -> Result<Agg, String> {
     }
 }
 
-fn handle_aggregate(bytes: &[u8], args: &Value) -> Value {
+fn handle_aggregate(state: &RelayState, handle: &str, bytes: &[u8], args: &Value) -> Value {
     let predicates = match parse_predicates(args) {
         Ok(p) => p,
         Err(e) => return error_result(&e),
@@ -756,7 +775,11 @@ fn handle_aggregate(bytes: &[u8], args: &Value) -> Value {
         Ok(a) => a,
         Err(e) => return error_result(&e),
     };
-    match query_aggregate(bytes, &predicates, &agg) {
+    match state
+        .datasets
+        .get_or_parse(handle, bytes)
+        .and_then(|ds| ds.query_aggregate(&predicates, &agg))
+    {
         Some(qr) => {
             let shown = qr
                 .matched

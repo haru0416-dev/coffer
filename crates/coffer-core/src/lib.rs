@@ -38,6 +38,7 @@ mod compressor;
 mod view;
 
 pub mod attest;
+pub mod dataset;
 pub mod detect;
 pub mod doc;
 pub mod index;
@@ -57,6 +58,7 @@ pub use budget::{
 };
 pub use compress::{MIN_COMPRESS_BYTES, compress};
 pub use compressor::{CompressError, Compressor};
+pub use dataset::Dataset;
 pub use detect::{ContentType, detect};
 pub use doc::{CompressedDoc, ReconstructError, Segment};
 pub use index::{
