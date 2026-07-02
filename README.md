@@ -135,15 +135,20 @@ codegen round-trip, and keeps every original byte recoverable.
 ## Quickstart
 
 ```sh
-# MCP gateway — wrap the server that floods your context (any stdio MCP server, any MCP host):
-cargo build --release -p coffer-wrap
-#   in your host's MCP config:  "command": ".../coffer-wrap", "args": ["<your-server-cmd>", "<args>…"]
+# Install straight from git (no release binaries yet; needs a Rust toolchain):
+cargo install --git https://github.com/haru0416-dev/coffer coffer-wrap --locked
+# (same for coffer-mcp and coffer-proxy)
+
+# MCP gateway — wrap the server that floods your context (any stdio MCP server, any MCP host).
+# Real example, from your host's MCP config, wrapping the official filesystem server:
+#   "command": "coffer-wrap",
+#   "args": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/allow"]
 
 # MCP server — hold outputs by handle, query them exactly:
-cargo run --release -p coffer-mcp
+coffer-mcp
 
 # Transparent proxy — compress tool_result blocks in flight:
-cargo run --release -p coffer-proxy
+coffer-proxy
 ANTHROPIC_BASE_URL=http://127.0.0.1:8788   # COFFER_PROXY_UPSTREAM defaults to api.anthropic.com
 ```
 
