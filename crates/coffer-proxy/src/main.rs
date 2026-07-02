@@ -8,7 +8,7 @@
 //! Env: `COFFER_PROXY_LISTEN` (default `127.0.0.1:8788`; a non-loopback bind is refused unless
 //! `COFFER_PROXY_ALLOW_PUBLIC` is set, since the proxy has no auth and replays client API keys —
 //!), `COFFER_PROXY_UPSTREAM`
-//! (default `https://api.anthropic.com`), `COFFER_PROXY_MIN` (min tool_result bytes to compress),
+//! (default `https://api.anthropic.com`), `COFFER_PROXY_MIN` (min `tool_result` bytes to compress),
 //! `COFFER_PROXY_MAX_BODY_MB` (max inbound request body MiB, default 64),
 //! `COFFER_CAS_DB` (shared `SqliteCas` for the proxy + MCP-unfold reversible loop; unset -> in-memory),
 //! `COFFER_CAS_SOFT_CAP_MB` (optional resident-cache warning threshold),
@@ -23,6 +23,16 @@
 //! Fail-open: a malformed JSON payload is forwarded unchanged (the transform never panics);
 //! an unreadable inbound body becomes `400`, and an upstream error becomes a `502` rather than a
 //! dropped connection.
+
+#![warn(clippy::pedantic)]
+// Cast lints: metrics/latency arithmetic over counters and body sizes bounded by the
+// request-body cap — a delta of two capped sizes cannot wrap an i64.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 
 use std::convert::Infallible;
 use std::path::PathBuf;
@@ -131,6 +141,9 @@ struct Config {
     max_concurrent: usize,
 }
 
+// The `_total` postfix is the wire naming of the metrics endpoint (Prometheus-style),
+// not accidental repetition.
+#[allow(clippy::struct_field_names)]
 struct ProxyMetrics {
     requests_total: AtomicU64,
     supported_requests_total: AtomicU64,
@@ -466,12 +479,9 @@ async fn proxy(
     // cannot multiply into multi-GB RSS. Shed with 503 (rather than queue unboundedly) on
     // contention; the permit is held across the body buffer + compression + upstream send, then
     // released when this function returns (before the response body streams, which holds no buffers).
-    let _permit = match cfg.concurrency.try_acquire() {
-        Ok(permit) => permit,
-        Err(_) => {
-            cfg.metrics.record_shed();
-            return Ok(shed_response());
-        }
+    let Ok(_permit) = cfg.concurrency.try_acquire() else {
+        cfg.metrics.record_shed();
+        return Ok(shed_response());
     };
 
     let body = body.map_err(std::io::Error::other).boxed();

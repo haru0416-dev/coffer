@@ -11,6 +11,17 @@
 //! MCP retrieves — the reversible loop). Only `tool_result` content is touched; the system prompt,
 //! user, and assistant text are never compressed.
 
+#![warn(clippy::pedantic, missing_docs)]
+// Cast lints: every cast here moves between token counts and byte lengths of in-memory
+// request bodies — bounded far below any lossy threshold (same rationale as coffer-core).
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+// Test fixtures favor readability over perf/style nits (same as coffer-core).
+#![cfg_attr(test, allow(clippy::format_push_string))]
+
 use coffer_cas::Cas;
 use coffer_core::{Budget, Compressor};
 use coffer_tokenizer::{HeuristicCounter, TokenCounter};
@@ -81,7 +92,7 @@ impl From<usize> for RewriteOptions {
 /// fail-open from a benign no-shrink in its metrics (production observability).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransformKind {
-    /// At least one tool_result / tool-output block shrank — coffer compressed the body.
+    /// At least one `tool_result` / tool-output block shrank — coffer compressed the body.
     Compressed,
     /// The body WAS the expected shape, but no block shrank (incompressible / below per-block
     /// threshold). Benign — the request is forwarded unchanged.
@@ -92,6 +103,9 @@ pub enum TransformKind {
     Passthrough,
 }
 
+/// Compress the `tool_result` blocks of an Anthropic Messages request; see
+/// [`compress_request_body_kind`] for the variant that also reports WHY a body
+/// was or wasn't changed.
 #[must_use]
 pub fn compress_request_body(
     body: &[u8],
@@ -135,13 +149,13 @@ pub fn compress_request_body_kind(
             }
             match block.get_mut("content") {
                 // tool_result content is a bare string …
-                Some(Value::String(s)) => changed |= squash(s, &counter, cas, opts),
+                Some(Value::String(s)) => changed |= squash(s, counter, cas, opts),
                 // … or an array of content blocks; compress only the text ones.
                 Some(Value::Array(arr)) => {
                     for c in arr.iter_mut() {
                         if c.get("type").and_then(Value::as_str) == Some("text") {
                             if let Some(Value::String(t)) = c.get_mut("text") {
-                                changed |= squash(t, &counter, cas, opts);
+                                changed |= squash(t, counter, cas, opts);
                             }
                         }
                     }
@@ -159,7 +173,7 @@ pub fn compress_request_body_kind(
     }
 }
 
-/// Compress the **tool-output** items of an OpenAI **Responses** request `body` (the shape Codex and
+/// Compress the **tool-output** items of an `OpenAI` **Responses** request `body` (the shape Codex and
 /// other Responses-API clients send to `/responses`): for each `input[]` item whose type ends in
 /// `_call_output` (`function_call_output`, `local_shell_call_output`, `custom_tool_call_output`),
 /// compress its `output` (a string, or an array of content blocks). Authored `message` content
@@ -209,11 +223,11 @@ pub fn compress_responses_body_kind(
             continue;
         }
         match item.get_mut("output") {
-            Some(Value::String(s)) => changed |= squash(s, &counter, cas, opts),
+            Some(Value::String(s)) => changed |= squash(s, counter, cas, opts),
             Some(Value::Array(arr)) => {
                 for c in arr.iter_mut() {
                     if let Some(Value::String(t)) = c.get_mut("text") {
-                        changed |= squash(t, &counter, cas, opts);
+                        changed |= squash(t, counter, cas, opts);
                     }
                 }
             }
@@ -231,10 +245,10 @@ pub fn compress_responses_body_kind(
 
 /// Compress the **tool-output** messages of an **Ollama** `/api/chat` request `body`: each
 /// `messages[]` entry with `role == "tool"` carries a tool result in its `content` string, which is
-/// compressed like an Anthropic `tool_result` / OpenAI `*_call_output`. Authored user/assistant/system
+/// compressed like an Anthropic `tool_result` / `OpenAI` `*_call_output`. Authored user/assistant/system
 /// messages are never touched. Fail-open and byte-exact recoverable, identical contract to the other
-/// transforms. Bedrock and OpenRouter need no new transform — they use the
-/// Anthropic Messages / OpenAI Responses shapes already handled, so they fan out by upstream routing.
+/// transforms. Bedrock and `OpenRouter` need no new transform — they use the
+/// Anthropic Messages / `OpenAI` Responses shapes already handled, so they fan out by upstream routing.
 #[must_use]
 pub fn compress_ollama_body(
     body: &[u8],
@@ -272,7 +286,7 @@ pub fn compress_ollama_body_kind(
             continue;
         }
         if let Some(Value::String(s)) = m.get_mut("content") {
-            changed |= squash(s, &counter, cas, opts);
+            changed |= squash(s, counter, cas, opts);
         }
     }
     if !changed {
@@ -307,7 +321,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 /// render actually shrinks (fail-open on small/incompressible content).
 fn squash(
     text: &mut String,
-    counter: &HeuristicCounter,
+    counter: HeuristicCounter,
     cas: &dyn Cas,
     opts: RewriteOptions,
 ) -> bool {
@@ -329,7 +343,7 @@ fn squash(
     let target = target.max(1);
     let Ok(doc) = Compressor::new()
         .budget(Budget::Tokens(target))
-        .counter(counter)
+        .counter(&counter)
         .min_bytes(0)
         .compress(text.as_bytes(), cas)
     else {
@@ -831,7 +845,7 @@ mod tests {
     }
 
     /// Build an Ollama body and recover the tool message's original content by reading the
-    /// offloaded blob from the shared SQLite CAS by the sentinel's short hash, then splicing it
+    /// offloaded blob from the shared `SQLite` CAS by the sentinel's short hash, then splicing it
     /// back into the compact render. Returns `(recovered_tool_content, parsed_output_value)`.
     fn ollama_compress_and_recover(
         tool_content: &str,

@@ -5,7 +5,7 @@
 //! computing an aggregate over the offloaded bytes beat reading a head/tail-truncated window?**
 //!
 //! What it shows, at each compression level over one synthetic-but-realistic `kubectl`-shaped dump:
-//!   1. compression % counted with the model's OWN tokenizer (OpenAI `o200k_base`, exact offline),
+//!   1. compression % counted with the model's OWN tokenizer (`OpenAI` `o200k_base`, exact offline),
 //!   2. a byte-exact `reconstruct(compress(x)) == x` check (the Stage-0 invariant) — at EVERY level,
 //!   3. coffer's exact answer to four aggregation questions, asserted against ground truth computed
 //!      independently in this file (so the harness also self-checks coffer's exactness),
@@ -22,15 +22,25 @@
 //!   cargo run --release -p coffer-eval            # defaults: 5000 rows, fixed seed
 //!   cargo run --release -p coffer-eval -- 20000 7 # rows seed
 //!
-//! Determinism: a fixed-seed SplitMix64 generator and a published, frozen tokenizer vocabulary mean
+//! Determinism: a fixed-seed `SplitMix64` generator and a published, frozen tokenizer vocabulary mean
 //! the printed numbers reproduce byte-for-byte on any machine.
+
+#![warn(clippy::pedantic)]
+// Cast lints: percentages/means over row counts and rng-derived bounded values —
+// all far below any lossy threshold (same rationale as coffer-core).
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 
 use coffer_cas::MemoryCas;
 use coffer_core::{Agg, Budget, Op, Predicate, compress_to_budget, query_aggregate};
 use coffer_tokenizer::{HeuristicCounter, TiktokenCounter, TokenCounter};
 use serde_json::{Value, json};
 
-/// Deterministic SplitMix64 — same sequence on every machine, no external dependency.
+/// Deterministic `SplitMix64` — same sequence on every machine, no external dependency.
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -162,6 +172,9 @@ fn truncation_window(per_row_tok: &[usize], budget_tok: usize) -> Vec<usize> {
     visible
 }
 
+// A linear benchmark script: setup, five budget levels, four questions, one table —
+// splitting it would hide the protocol it exists to make readable.
+#[allow(clippy::too_many_lines)]
 fn main() {
     let mut args = std::env::args().skip(1);
     let n: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(5_000);
@@ -357,7 +370,7 @@ fn main() {
     let head_name = rows[0]["name"].as_str().unwrap_or("");
     let aggressive = levels.last().expect("at least one level");
     let head_visible = aggressive.2.contains(&0);
-    println!("\n## Where coffer does NOT win (reported, not hidden)\n",);
+    println!("\n## Where coffer does NOT win (reported, not hidden)\n");
     println!(
         "- **In-window retrieval** — \"what is the status of pod `{head_name}`?\" (record 0, in the kept head). At the most aggressive {:.1}% level the truncation window still {} this row, so it answers correctly — a **tie** with coffer, not a win. Compressing input the model's context already fits does not beat feeding it raw.",
         aggressive.0,
@@ -401,7 +414,11 @@ mod tests {
             .iter()
             .map(|r| num(r, "restarts"))
             .fold(f64::MIN, f64::max);
-        assert_eq!(truth_max, 99_999.0, "the buried needle must be present");
+        // Exact literal comparison intended: the needle is an integer-valued f64.
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(truth_max, 99_999.0, "the buried needle must be present");
+        }
 
         // (1) coffer is exact.
         let c = query_aggregate(&bytes, &[eq("status", "CrashLoopBackOff")], &Agg::Count)

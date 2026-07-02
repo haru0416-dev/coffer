@@ -2,8 +2,17 @@
 //!
 //! Spawns the downstream stdio MCP server as a child process and relays JSON-RPC
 //! between it and our own stdin/stdout, offloading oversized tool results into a CAS
-//! (in-memory by default; SQLite via `COFFER_CAS_DB`, shared with coffer-proxy /
+//! (in-memory by default; `SQLite` via `COFFER_CAS_DB`, shared with coffer-proxy /
 //! coffer-mcp). stdout carries JSON-RPC only; all logging goes to stderr.
+
+#![warn(clippy::pedantic)]
+// Cast lints: env-derived sizes bounded by config validation.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 
 use std::process::{ExitCode, Stdio};
 

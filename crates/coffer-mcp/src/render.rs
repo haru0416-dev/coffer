@@ -422,7 +422,7 @@ pub(crate) fn ingested_text(handle: &str, bytes: &[u8]) -> String {
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum IngestView {
     Summary,
     StructuralCode,

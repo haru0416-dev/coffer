@@ -3,6 +3,16 @@
 //! targeted `search`/`lines`, and byte-exact `retrieve` — so huge tool-output never enters the
 //! model's context.
 
+#![warn(clippy::pedantic)]
+// Cast lints: tool arguments (row indices, byte offsets, timestamps) bounded by
+// in-memory payload sizes and clamped limits — same rationale as coffer-core.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+
 use std::path::Path;
 
 use coffer_core::{Predicate, compress_json_where, query_subset};
@@ -17,12 +27,21 @@ mod render;
 mod run;
 mod store;
 
+// Glob re-imports intentionally reconstruct the pre-split single-file scope: the tool
+// router below and the (large) test module exercise items from every submodule.
+#[allow(clippy::wildcard_imports)]
 use limits::*;
+#[allow(clippy::wildcard_imports)]
 use render::*;
+#[allow(clippy::wildcard_imports)]
 use run::*;
+#[allow(clippy::wildcard_imports)]
 use store::*;
 
-/// Build a conjunction of typed predicates from the wire form. Shared by coffer_select / coffer_aggregate.
+/// How many provenance row indices a tool response prints before eliding with a count.
+const SHOWN: usize = 64;
+
+/// Build a conjunction of typed predicates from the wire form. Shared by `coffer_select` / `coffer_aggregate`.
 fn predicates_from_args(args: &[PredicateArg]) -> Vec<Predicate> {
     args.iter()
         .map(|p| Predicate {
@@ -267,7 +286,6 @@ impl Coffer {
             .and_then(|ds| ds.query_aggregate(&predicates, &agg))
         {
             Some(r) => {
-                const SHOWN: usize = 64;
                 let idx = if r.matched.len() <= SHOWN {
                     format!("{:?}", r.matched)
                 } else {
@@ -398,7 +416,6 @@ impl Coffer {
         let right_where = predicates_from_args(&a.right_where);
         match lds.join_aggregate(&rds, &a.left_key, &a.right_key, &right_where, &agg) {
             Some(r) => {
-                const SHOWN: usize = 64;
                 let idx = if r.matched.len() <= SHOWN {
                     format!("{:?}", r.matched)
                 } else {
@@ -444,7 +461,6 @@ impl Coffer {
         {
             Some(r) => {
                 let agree = (r.value - a.expected).abs() <= 1e-9 + 1e-9 * r.value.abs();
-                const SHOWN: usize = 64;
                 let idx = if r.matched.len() <= SHOWN {
                     format!("{:?}", r.matched)
                 } else {
@@ -738,21 +754,21 @@ struct RunArgs {
 struct IngestArgs {
     /// Path to a file to ingest.
     path: String,
-    /// Optional compact view to return with the handle. Supported: structural_code.
+    /// Optional compact view to return with the handle. Supported: `structural_code`.
     view: Option<String>,
-    /// Optional token target for the compact view. Defaults to 1024 for structural_code.
+    /// Optional token target for the compact view. Defaults to 1024 for `structural_code`.
     target_tokens: Option<usize>,
 }
 #[derive(Deserialize, JsonSchema)]
 struct DigestArgs {
-    /// The handle returned by coffer_run / coffer_ingest, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// A natural-language aggregate, e.g. "how many commits changed more than 50 files".
     query: String,
 }
 #[derive(Deserialize, JsonSchema)]
 struct QueryArgs {
-    /// The handle returned by coffer_run / coffer_ingest, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// The JSON field to filter on.
     field: String,
@@ -763,7 +779,7 @@ struct QueryArgs {
 }
 #[derive(Deserialize, JsonSchema)]
 struct SelectArgs {
-    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest` / `coffer_select`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// Conjunctive predicates; a row is kept only if it passes ALL of them. An empty list keeps every row.
     #[serde(rename = "where", default)]
@@ -771,12 +787,12 @@ struct SelectArgs {
 }
 #[derive(Deserialize, JsonSchema)]
 struct DescribeArgs {
-    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest` / `coffer_select`, or a unique shared-CAS sentinel prefix.
     handle: String,
 }
 #[derive(Deserialize, JsonSchema)]
 struct AggregateArgs {
-    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest` / `coffer_select`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// Conjunctive filter predicates; a row is counted only if it passes ALL of them. Empty = all rows.
     #[serde(rename = "where", default)]
@@ -797,14 +813,14 @@ struct PredicateArg {
 }
 #[derive(Deserialize, JsonSchema)]
 struct PickArgs {
-    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest` / `coffer_select`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// Zero-based record indices to pull (e.g. the provenance indices reported by a typed query). Order is preserved.
     indices: Vec<usize>,
 }
 #[derive(Deserialize, JsonSchema)]
 struct BucketArgs {
-    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest` / `coffer_select`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// The numeric field to bucket on; rows are grouped by floor(value / width).
     field: String,
@@ -817,7 +833,7 @@ struct BucketArgs {
 }
 #[derive(Deserialize, JsonSchema)]
 struct WindowArgs {
-    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest` / `coffer_select`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// The pattern to match (case-insensitive substring) on each line.
     pattern: String,
@@ -838,7 +854,7 @@ struct JoinArgs {
     agg: Option<String>,
     /// Field to aggregate over the LEFT rows. Required for sum/mean/min/max; ignored for count.
     field: Option<String>,
-    /// Optional conjunctive filter on the RIGHT rows (ignored when group_by is set).
+    /// Optional conjunctive filter on the RIGHT rows (ignored when `group_by` is set).
     #[serde(default)]
     right_where: Vec<PredicateArg>,
     /// Set to a RIGHT field for a project-join group-by ("agg BY right.<field>") instead of a scalar.
@@ -846,7 +862,7 @@ struct JoinArgs {
 }
 #[derive(Deserialize, JsonSchema)]
 struct CheckClaimArgs {
-    /// The handle returned by coffer_run / coffer_ingest / coffer_select, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest` / `coffer_select`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// Conjunctive filter predicates; a row is counted only if it passes ALL of them. Empty = all rows.
     #[serde(rename = "where", default)]
@@ -862,12 +878,12 @@ struct CheckClaimArgs {
 struct VerifyReceiptArgs {
     /// The handle holding the data to re-verify against, or a unique shared-CAS sentinel prefix.
     handle: String,
-    /// The receipt JSON string returned by coffer_receipt.
+    /// The receipt JSON string returned by `coffer_receipt`.
     receipt: String,
 }
 #[derive(Deserialize, JsonSchema)]
 struct RowsArgs {
-    /// The handle returned by coffer_run / coffer_ingest, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// Optional zero-based row offset.
     start: Option<usize>,
@@ -876,14 +892,14 @@ struct RowsArgs {
 }
 #[derive(Deserialize, JsonSchema)]
 struct JsonPathArgs {
-    /// The handle returned by coffer_run / coffer_ingest, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// JSON path using `$`, `.field`, and `[index]`, e.g. `$.items[0].name`.
     path: String,
 }
 #[derive(Deserialize, JsonSchema)]
 struct LinesArgs {
-    /// The handle returned by coffer_run / coffer_ingest, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// Optional 1-based first line to return.
     start_line: Option<usize>,
@@ -896,7 +912,7 @@ struct LinesArgs {
 }
 #[derive(Deserialize, JsonSchema)]
 struct SearchArgs {
-    /// The handle returned by coffer_run / coffer_ingest, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// Case-insensitive substring to search for.
     pattern: String,
@@ -905,7 +921,7 @@ struct SearchArgs {
 }
 #[derive(Deserialize, JsonSchema)]
 struct RetrieveArgs {
-    /// The handle returned by coffer_run / coffer_ingest, or a unique shared-CAS sentinel prefix.
+    /// The handle returned by `coffer_run` / `coffer_ingest`, or a unique shared-CAS sentinel prefix.
     handle: String,
     /// Optional byte offset to start returning from.
     start: Option<usize>,
@@ -1005,7 +1021,7 @@ mod tests {
 
     #[test]
     fn structural_code_ingest_view_keeps_outline_and_retrieval_sentinel() {
-        let input = br#"
+        let input = br"
 use std::collections::HashMap;
 
 pub struct Widget {
@@ -1021,7 +1037,7 @@ impl Widget {
         total
     }
 }
-"#;
+";
         let handle = ContentHash::of(input).as_str().to_string();
         let cas = MemoryCas::new();
         let text =

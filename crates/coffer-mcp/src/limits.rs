@@ -10,7 +10,7 @@ pub(crate) const DEFAULT_RUN_TIMEOUT_SECONDS: u64 = 300;
 pub(crate) const DEFAULT_MAX_RUN_OUTPUT_BYTES: usize = 64 * MIB;
 /// Hard ceiling on rows pretty-printed by `coffer_rows`, overridable via `COFFER_MCP_MAX_ROWS`.
 /// Bounds the model-facing response so a large `limit` cannot re-bloat the context that the
-/// server-side hold exists to keep out of it (the original stays reachable via coffer_retrieve).
+/// server-side hold exists to keep out of it (the original stays reachable via `coffer_retrieve`).
 pub(crate) const DEFAULT_MAX_ROWS: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,8 +63,7 @@ pub(crate) fn run_limits_from_values(
     let timeout_seconds =
         positive_u64_from_value(timeout_raw).unwrap_or(DEFAULT_RUN_TIMEOUT_SECONDS);
     let max_output_bytes = positive_usize_from_value(output_mb_raw)
-        .map(|mb| mb.saturating_mul(MIB))
-        .unwrap_or(DEFAULT_MAX_RUN_OUTPUT_BYTES);
+        .map_or(DEFAULT_MAX_RUN_OUTPUT_BYTES, |mb| mb.saturating_mul(MIB));
     RunLimits {
         timeout_seconds,
         max_output_bytes,

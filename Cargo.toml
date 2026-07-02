@@ -57,9 +57,9 @@ proptest = "1"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
-# Baseline clippy gate for every member. The shipped engine crates (coffer-core / coffer-cas /
-# coffer-tokenizer) additionally opt into `clippy::pedantic` + `missing_docs` via a crate-level
-# attribute, with justified `allow`s at bounded-cast sites — the eval harness stays at this baseline.
+# Baseline clippy gate for every member. Every crate additionally opts into `clippy::pedantic`
+# via a crate-level attribute (libraries also warn on `missing_docs`), with justified `allow`s
+# at bounded-cast sites; CI runs the workspace with `-D warnings`.
 [workspace.lints.clippy]
 all = "warn"
 

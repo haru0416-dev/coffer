@@ -25,6 +25,15 @@
 //! never offloaded (a large error must stay visible), and collision renames take effect
 //! after the first `tools/list` response (clients list before they call).
 
+#![warn(clippy::pedantic, missing_docs)]
+// Cast lints: tool arguments (row indices, byte offsets, window sizes) clamped to in-memory
+// payload bounds before use — same rationale as coffer-core's justified allows.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -90,7 +99,7 @@ fn env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok()?.trim().parse().ok()
 }
 
-/// Where offloaded originals live. SQLite (via `COFFER_CAS_DB`) shares the store with
+/// Where offloaded originals live. `SQLite` (via `COFFER_CAS_DB`) shares the store with
 /// coffer-proxy / coffer-mcp across processes; memory is the zero-setup default.
 pub enum HandleStore {
     /// In-memory store — handles live only as long as this wrap process.
@@ -420,6 +429,8 @@ fn inject_tools(msg: &mut Value, state: &RelayState) {
     *state.names.lock().unwrap_or_else(PoisonError::into_inner) = advertised;
 }
 
+// A declarative table of seven tool definitions — length is the data, not complexity.
+#[allow(clippy::too_many_lines)]
 fn tool_def(kind: ToolKind, name: &str) -> Value {
     let handle_prop = json!({
         "type": "string",
@@ -646,7 +657,7 @@ fn clip_chars(s: &str, max_chars: usize) -> String {
 // ---------------------------------------------------------------------------
 
 fn ok_result(text: String) -> Value {
-    json!({"content": [{"type": "text", "text": text}], "isError": false})
+    json!({"content": [{"type": "text", "text": Value::String(text)}], "isError": false})
 }
 
 fn error_result(msg: &str) -> Value {
@@ -913,6 +924,7 @@ fn handle_search(state: &RelayState, handle: &str, bytes: &[u8], args: &Value) -
 }
 
 fn handle_lines(bytes: &[u8], args: &Value) -> Value {
+    const MAX_SPAN: u64 = 500;
     let (Some(start), Some(end)) = (
         args.get("start").and_then(Value::as_u64),
         args.get("end").and_then(Value::as_u64),
@@ -922,7 +934,6 @@ fn handle_lines(bytes: &[u8], args: &Value) -> Value {
     if start == 0 || end < start {
         return error_result("start must be >= 1 and end >= start");
     }
-    const MAX_SPAN: u64 = 500;
     let clamped_end = end.min(start + MAX_SPAN - 1);
     let text = String::from_utf8_lossy(bytes);
     let slice: Vec<&str> = text
