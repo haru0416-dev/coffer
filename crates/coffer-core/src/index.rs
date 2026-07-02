@@ -451,25 +451,60 @@ pub fn describe(input: &[u8]) -> Option<String> {
     describe_rows(arr)
 }
 
+/// The canonical JSON text of a string value, byte-identical to serializing it as a
+/// `Value`: `serde_json` escapes only `"`, `\` and control bytes (< 0x20) — non-ASCII
+/// passes through raw — so a string with none of those serializes as exactly `"<s>"`.
+fn canonical_string_text(s: &str) -> String {
+    if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        out.push_str(s);
+        out.push('"');
+        out
+    } else {
+        Value::String(s.to_owned()).to_string()
+    }
+}
+
 /// `Value::to_string()` with allocation fast paths for the two shapes that dominate real record
-/// sets (plain strings and numbers). Output is byte-identical to `to_string()`: `serde_json` escapes
-/// only `"`, `\` and control bytes (< 0x20) — non-ASCII passes through raw — so a string with none
-/// of those serializes as exactly `"<s>"`; a `Number`'s `Display` prints its canonical JSON text.
+/// sets (plain strings and numbers). Output is byte-identical to `to_string()`: see
+/// [`canonical_string_text`]; a `Number`'s `Display` prints its canonical JSON text.
 fn canonical_text(val: &Value) -> String {
     match val {
-        Value::String(s) if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') => {
-            let mut out = String::with_capacity(s.len() + 2);
-            out.push('"');
-            out.push_str(s);
-            out.push('"');
-            out
-        }
+        Value::String(s) => canonical_string_text(s),
         Value::Number(n) => n.to_string(),
         _ => val.to_string(),
     }
 }
 
+/// Per-field accumulator for [`describe_rows`]'s single pass. The count-by-value map is
+/// split per JSON type so the hot types count on BORROWED keys — `&str` for strings and
+/// `&Number` for numbers (`Number`'s `Eq`/`Hash` compare its repr, which is exactly its
+/// canonical text) — instead of allocating a canonical-text `String` per row-value.
+/// Canonical texts of distinct types can never collide (strings are quoted, numbers start
+/// with a digit or `-`, bools with `t`/`f`, containers with `[`/`{`), so the per-type
+/// counts merge losslessly into the single count-by-text map they replace.
+#[derive(Default)]
+struct FieldAcc<'a> {
+    strings: std::collections::HashMap<&'a str, usize>,
+    numbers: std::collections::HashMap<&'a serde_json::Number, usize>,
+    trues: usize,
+    falses: usize,
+    /// Containers — rare as field values; keyed by canonical text like the original.
+    other: std::collections::HashMap<String, usize>,
+    /// `f64` values in row order — used only when the field stays clean-numeric, in which
+    /// case it equals `numeric_vals`' collection exactly (same values, same order).
+    vals: Vec<f64>,
+    /// Starts `true`; cleared when ANY present value (null included) is not an
+    /// `f64`-representable number — `field_is_clean_numeric`'s contract.
+    clean: bool,
+}
+
 /// [`describe`] over already-parsed records — the parse-once path used by [`crate::Dataset`].
+///
+/// One pass over every record's own key/value pairs discovers fields (first-seen order) and
+/// accumulates all per-field statistics at once; the previous shape re-walked the whole
+/// array once per field per statistic.
 pub(crate) fn describe_rows(arr: &[Value]) -> Option<String> {
     const MAX_CATEGORICAL: usize = 12;
     let n = arr.len();
@@ -479,58 +514,109 @@ pub(crate) fn describe_rows(arr: &[Value]) -> Option<String> {
     if !arr.iter().any(Value::is_object) {
         return None; // not a record set
     }
-    // field names in first-seen order across all records (records may have heterogeneous keys)
-    let mut fields: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut fields: Vec<&str> = Vec::new();
+    let mut accs: std::collections::HashMap<&str, FieldAcc> = std::collections::HashMap::new();
     for rec in arr {
-        if let Some(o) = rec.as_object() {
-            for k in o.keys() {
-                if seen.insert(k.clone()) {
-                    fields.push(k.clone());
+        let Some(o) = rec.as_object() else { continue };
+        for (k, v) in o {
+            // Single hash lookup per (row, field): vacant discovers the field in
+            // first-seen order, occupied hands back the accumulator.
+            let acc = match accs.entry(k.as_str()) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    fields.push(k.as_str());
+                    e.insert(FieldAcc {
+                        clean: true,
+                        ..FieldAcc::default()
+                    })
+                }
+            };
+            match v {
+                Value::Null => acc.clean = false, // present but excluded from count-by
+                Value::Number(num) => {
+                    match num.as_f64() {
+                        Some(f) => acc.vals.push(f),
+                        None => acc.clean = false, // arbitrary_precision non-f64: refuse stats
+                    }
+                    *acc.numbers.entry(num).or_default() += 1;
+                }
+                Value::String(s) => {
+                    acc.clean = false;
+                    *acc.strings.entry(s.as_str()).or_default() += 1;
+                }
+                Value::Bool(b) => {
+                    acc.clean = false;
+                    if *b {
+                        acc.trues += 1;
+                    } else {
+                        acc.falses += 1;
+                    }
+                }
+                other => {
+                    acc.clean = false;
+                    *acc.other.entry(canonical_text(other)).or_default() += 1;
                 }
             }
         }
     }
+
     let mut lines = vec![format!("[describe] {n} records, {} fields", fields.len())];
-    for f in &fields {
-        // count-by canonical JSON text over present, non-null values. A HashMap is safe here:
-        // the only order-sensitive consumer (the categorical breakdown) re-sorts by
-        // (count desc, key asc), and the other consumers use only sums/lengths.
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for rec in arr {
-            if let Some(val) = rec.as_object().and_then(|o| o.get(f)) {
-                if !val.is_null() {
-                    *counts.entry(canonical_text(val)).or_default() += 1;
-                }
-            }
-        }
-        let present: usize = counts.values().sum();
-        let distinct = counts.len();
-        if let Some(vals) = numeric_vals(arr, f) {
-            let sum: f64 = vals.iter().sum();
-            let mean = sum / vals.len() as f64;
-            let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
-            let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            lines.push(format!(
-                "  {f}: number present={present} distinct={distinct} min={min} max={max} mean={mean} sum={sum}"
-            ));
-        } else if distinct <= MAX_CATEGORICAL && distinct < present {
-            // low-cardinality categorical: count-by-value, most frequent first (ties broken by key)
-            let mut pairs: Vec<(String, usize)> = counts.into_iter().collect();
-            pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            let breakdown = pairs
-                .iter()
-                .map(|(k, c)| format!("{k}:{c}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(format!(
-                "  {f}: present={present} distinct={distinct} — {breakdown}"
-            ));
-        } else {
-            lines.push(format!("  {f}: present={present} distinct={distinct}"));
-        }
+    for f in fields {
+        lines.push(field_line(f, &accs[f], MAX_CATEGORICAL));
     }
     Some(lines.join("\n"))
+}
+
+/// One `describe` output line for a field, from its accumulated stats.
+fn field_line(f: &str, acc: &FieldAcc, max_categorical: usize) -> String {
+    let present = acc.strings.values().sum::<usize>()
+        + acc.numbers.values().sum::<usize>()
+        + acc.trues
+        + acc.falses
+        + acc.other.values().sum::<usize>();
+    let distinct = acc.strings.len()
+        + acc.numbers.len()
+        + usize::from(acc.trues > 0)
+        + usize::from(acc.falses > 0)
+        + acc.other.len();
+    if acc.clean && !acc.vals.is_empty() {
+        let vals = &acc.vals;
+        let sum: f64 = vals.iter().sum();
+        let mean = sum / vals.len() as f64;
+        let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        format!(
+            "  {f}: number present={present} distinct={distinct} min={min} max={max} mean={mean} sum={sum}"
+        )
+    } else if distinct <= max_categorical && distinct < present {
+        // low-cardinality categorical: count-by-value, most frequent first (ties broken
+        // by key). Canonical texts materialize HERE — at most `max_categorical` of them —
+        // not once per row.
+        let mut pairs: Vec<(String, usize)> = Vec::with_capacity(distinct);
+        pairs.extend(
+            acc.strings
+                .iter()
+                .map(|(s, c)| (canonical_string_text(s), *c)),
+        );
+        pairs.extend(acc.numbers.iter().map(|(num, c)| (num.to_string(), *c)));
+        if acc.trues > 0 {
+            pairs.push(("true".to_string(), acc.trues));
+        }
+        if acc.falses > 0 {
+            pairs.push(("false".to_string(), acc.falses));
+        }
+        pairs.extend(acc.other.iter().map(|(t, c)| (t.clone(), *c)));
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let breakdown = pairs
+            .iter()
+            .map(|(k, c)| format!("{k}:{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("  {f}: present={present} distinct={distinct} — {breakdown}")
+    } else {
+        format!("  {f}: present={present} distinct={distinct}")
+    }
 }
 
 /// Generalized deterministic digest over a JSON array of objects — the class of facts emergent

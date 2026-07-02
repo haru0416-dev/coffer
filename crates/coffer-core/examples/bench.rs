@@ -172,5 +172,21 @@ fn main() {
     bench("Dataset digest max restarts, warm (json_40k)", 20, || {
         ds.digest("max restarts")
     });
+    // The one-time stats pass a NEW handle pays for describe, parse excluded (single-shot
+    // timings: the memo makes repeated calls on one dataset meaningless to sample).
+    {
+        let mut singles = Vec::new();
+        for _ in 0..5 {
+            let d = Dataset::from_rows(serde_json::from_slice::<Vec<Value>>(&json_40k).unwrap());
+            let t = Instant::now();
+            black_box(d.describe());
+            singles.push(t.elapsed().as_nanos() as f64 / 1000.0);
+        }
+        println!(
+            "{:<58} {:>12.1} us",
+            "Dataset describe, cold stats pass (json_40k)",
+            median_us(singles)
+        );
+    }
     bench("Dataset describe, warm (json_40k)", 20, || ds.describe());
 }
