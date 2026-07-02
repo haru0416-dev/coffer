@@ -4,6 +4,8 @@
 [![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)
 
+**English** | [日本語](README.ja.md)
+
 > When a tool result is too big for the model to read, don't truncate it — **hold it**.
 > coffer keeps the exact bytes in a content store, hands the model a verified handle, and
 > answers count / sum / max / group-by / join questions over **all** of the data, exactly.
