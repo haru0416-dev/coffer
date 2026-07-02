@@ -10,7 +10,22 @@ permissions:
   contents: write
 
 jobs:
+  # Create the release (with generated notes) exactly ONCE, before the platform matrix:
+  # when every matrix job carried generate_release_notes, each one appended another copy
+  # of the notes to the release body.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+
   build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -69,12 +84,7 @@ jobs:
           fi
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.tar.gz
-            dist/*.tar.gz.sha256
-            dist/*.zip
-            dist/*.zip.sha256
-          draft: false
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz* dist/*.zip* --clobber
