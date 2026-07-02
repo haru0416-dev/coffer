@@ -1,0 +1,23 @@
+[package]
+name = "coffer-eval"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Reproducible, API-key-free benchmark: coffer's exact compute-digest vs head/tail truncation at equal token budget, with a byte-exact round-trip check at every level."
+
+[[bin]]
+name = "coffer-eval"
+path = "src/main.rs"
+
+[dependencies]
+coffer-core = { path = "../coffer-core" }
+coffer-cas = { path = "../coffer-cas" }
+# Always-on real OpenAI o200k_base counting: the entire point of this harness is that headline token
+# numbers are the model's own, not the chars/4 estimate the budget search uses internally.
+coffer-tokenizer = { path = "../coffer-tokenizer", features = ["tiktoken"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -72,14 +72,39 @@ only their best regime. coffer commits to the opposite, against a protocol fixed
 - Count tokens with the **target model's own tokenizer**, and **count retrieval round-trip tokens.**
   Byte-faithful round-trip fidelity is reported separately from accuracy.
 
+Two of those commitments are **mechanical, and reproducible with no API key.** `cargo run --release -p
+coffer-eval` regenerates the table below over a 5,000-pod `kubectl` dump (~229k o200k tokens), counting
+with the model's own tokenizer:
+
+| compression | byte-exact round-trip | coffer answer error | head/tail truncation error at the same budget (count · sum · argmax) |
+|------------:|:---------------------:|:-------------------:|:---------------------------------------------------------------------|
+| 33% | ✅ | **0.00%** | 33% · 34% · ❌ buried needle missed |
+| 67% | ✅ | **0.00%** | 68% · 61% · ❌ buried needle missed |
+| 87% | ✅ | **0.00%** | 87% · 83% · ❌ buried needle missed |
+| 93% | ✅ | **0.00%** | 93% · 91% · ❌ buried needle missed |
+| 97% | ✅ | **0.00%** | 98% · 96% · ❌ buried needle missed |
+
+coffer's answers are computed over **all** the bytes (including the offloaded ones) and asserted against
+independently-computed ground truth, so its error is 0.00% at every level. The figures are the
+*truncation* baseline's error at the **same token budget**, modeled generously as a perfect aggregate
+over exactly the rows its window shows — a real model sees no more rows and is worse at arithmetic, so
+this is an upper bound for it. An exact answer costs ~20 retrieval tokens regardless of dump size.
+Truncation is **not** uniformly bad: on a sampling-robust statistic like a mean it stays within a few
+percent — coffer's win is on the answers that depend on rows the window drops (counts, sums, the buried
+extremum), and the harness reports the mean column where it doesn't.
+
+The fourth commitment — **end-task accuracy with a real model**, at multiple compression levels against
+this same truncation baseline — is the open experimental question the harness above does **not** settle:
+it proves the two mechanical properties (byte-exact round-trip, exact aggregation), not that an LLM
+answers better. If that accuracy thesis fails its kill-probe, the failed curve is still a useful public
+result.
+
 Where coffer does **not** win is just as clear. On plain retrieval that a frontier model's context window
 already handles, compressing the input does not beat feeding it raw — coffer matches it, no more. And a
 code-execution agent can compute the same exact aggregate by writing its own code; on accuracy that is a
 tie, not a coffer win. The difference worth stating plainly is narrower: coffer runs at the transport
 layer before the bytes ever reach the model, needs no code sandbox or codegen round-trip, and keeps every
 original byte recoverable.
-
-If the accuracy thesis fails its kill-probe, the failed curve is still a useful public result.
 
 ## Quickstart
 
@@ -104,7 +129,8 @@ auth and replays your upstream key); the MCP `coffer_run` shell tool is disabled
 ## Layout
 
 - `crates/` — the engine (`coffer-core`), content store (`coffer-cas`), tokenizer-parity counting
-  (`coffer-tokenizer`), MCP server (`coffer-mcp`), and transparent proxy (`coffer-proxy`).
+  (`coffer-tokenizer`), MCP server (`coffer-mcp`), transparent proxy (`coffer-proxy`), and the
+  reproducible benchmark (`coffer-eval`, the table above — `cargo run --release -p coffer-eval`).
 - [`docs/DESIGN.md`](docs/DESIGN.md) — design & specification: the reversibility invariant, data model,
   compression pipeline, budget search, the compute-digest, surfaces, and non-goals.
 - [`docs/deployment.md`](docs/deployment.md) — MCP/proxy deployment, shared-CAS wiring, and limits.

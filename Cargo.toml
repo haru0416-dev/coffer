@@ -8,6 +8,7 @@ members = [
     "crates/coffer-tokenizer",
     "crates/coffer-mcp",
     "crates/coffer-proxy",
+    "crates/coffer-eval",
 ]
 
 [workspace.package]
