@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "coffer-cas"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "rusqlite",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "coffer-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "coffer-cas",
  "coffer-tokenizer",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "coffer-eval"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "coffer-cas",
  "coffer-core",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "coffer-mcp"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "coffer-cas",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "coffer-proxy"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -247,14 +247,14 @@ dependencies = [
 
 [[package]]
 name = "coffer-tokenizer"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "tiktoken-rs",
 ]
 
 [[package]]
 name = "coffer-wrap"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "coffer-cas",
  "coffer-core",

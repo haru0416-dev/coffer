@@ -1,0 +1,75 @@
+name: release
+
+# Tag-driven binary releases: push a `v*` tag and each platform job builds the three
+# binaries, packages them with LICENSE/README, and uploads to the GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Build each binary PER PACKAGE, never --workspace: a workspace build unifies
+      # cargo features across every member, and coffer-eval's always-on `tiktoken`
+      # feature would leak ~0.5 MB of unused tokenizer vocabulary into every binary
+      # (measured: coffer-wrap 3.8 MB per-package vs 4.3 MB workspace-built).
+      - name: Build
+        run: |
+          cargo build --release --locked -p coffer-wrap
+          cargo build --release --locked -p coffer-mcp
+          cargo build --release --locked -p coffer-proxy
+        shell: bash
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="coffer-v${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          ext=""
+          if [[ "${{ matrix.os }}" == windows-* ]]; then ext=".exe"; fi
+          for bin in coffer-wrap coffer-mcp coffer-proxy; do
+            cp "target/release/${bin}${ext}" "dist/${name}/"
+          done
+          cp LICENSE README.md "dist/${name}/"
+          cd dist
+          if [[ "${{ matrix.os }}" == windows-* ]]; then
+            7z a "${name}.zip" "${name}" > /dev/null
+            sha256sum "${name}.zip" > "${name}.zip.sha256"
+          else
+            tar czf "${name}.tar.gz" "${name}"
+            shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          draft: false
+          generate_release_notes: true
