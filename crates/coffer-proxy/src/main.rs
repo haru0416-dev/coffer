@@ -113,6 +113,11 @@ struct Config {
     /// Prepend the in-band sentinel explainer to every rewritten block
     /// (`COFFER_PROXY_EXPLAIN`, default on; set 0/false to disable).
     explain: bool,
+    /// Fraction of a block's tokens to cut (`COFFER_PROXY_REDUCTION`, default 0.8).
+    reduction: f32,
+    /// Absolute ceiling on kept tokens per block, heuristic count
+    /// (`COFFER_PROXY_MAX_KEPT_TOKENS`, default 4000; 0 disables).
+    max_kept_tokens: usize,
     max_body_bytes: usize,
     store: Store,
     client: reqwest::Client,
@@ -325,6 +330,15 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("COFFER_PROXY_EXPLAIN").ok().as_deref(),
         Some("0" | "false" | "off")
     );
+    let reduction: f32 = std::env::var("COFFER_PROXY_REDUCTION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|r: &f32| r.is_finite() && (0.0..1.0).contains(r))
+        .unwrap_or(coffer_proxy::DEFAULT_REDUCTION);
+    let max_kept_tokens: usize = std::env::var("COFFER_PROXY_MAX_KEPT_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(coffer_proxy::DEFAULT_MAX_KEPT_TOKENS);
     let max_body_bytes = proxy_max_body_bytes_from_env();
 
     let store = match std::env::var("COFFER_CAS_DB") {
@@ -372,6 +386,8 @@ async fn main() -> anyhow::Result<()> {
         upstream,
         min,
         explain,
+        reduction,
+        max_kept_tokens,
         max_body_bytes,
         store,
         client,
@@ -644,6 +660,8 @@ fn health_response(cfg: &Config) -> Response<ProxyBody> {
         "version": env!("CARGO_PKG_VERSION"),
         "store": cfg.store.kind(),
         "compress_min_bytes": cfg.min,
+        "compress_reduction": cfg.reduction,
+        "max_kept_tokens": cfg.max_kept_tokens,
         "max_body_bytes": cfg.max_body_bytes,
         "max_concurrent_requests": cfg.max_concurrent,
         "capture_enabled": cfg.capture_dir.is_some(),
@@ -672,6 +690,8 @@ fn metrics_response(cfg: &Config) -> Response<ProxyBody> {
         "in_flight_requests": cfg.max_concurrent.saturating_sub(cfg.concurrency.available_permits()),
         "config": {
             "compress_min_bytes": cfg.min,
+            "compress_reduction": cfg.reduction,
+            "max_kept_tokens": cfg.max_kept_tokens,
             "max_body_bytes": cfg.max_body_bytes,
             "max_concurrent_requests": cfg.max_concurrent,
             "capture_enabled": cfg.capture_dir.is_some(),
@@ -917,6 +937,8 @@ fn compress_then_flush(
     let opts = RewriteOptions {
         min_compress: cfg.min,
         explain: cfg.explain,
+        reduction: cfg.reduction,
+        max_kept_tokens: cfg.max_kept_tokens,
     };
     let (out, kind) = transform(body, cfg.store.as_cas(), opts);
     cfg.store.flush();
@@ -1135,6 +1157,8 @@ mod tests {
             upstream,
             min: 1024,
             explain: true,
+            reduction: coffer_proxy::DEFAULT_REDUCTION,
+            max_kept_tokens: coffer_proxy::DEFAULT_MAX_KEPT_TOKENS,
             max_body_bytes,
             store: super::Store::Memory(coffer_cas::MemoryCas::new()),
             client: reqwest::Client::new(),

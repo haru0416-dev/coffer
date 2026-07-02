@@ -13,11 +13,21 @@
 
 use coffer_cas::Cas;
 use coffer_core::{Budget, Compressor};
-use coffer_tokenizer::HeuristicCounter;
+use coffer_tokenizer::{HeuristicCounter, TokenCounter};
 use serde_json::Value;
 
-/// Aim to cut this fraction of a compressible `tool_result`'s tokens.
-const REDUCTION: f32 = 0.8;
+/// Default fraction of a compressible `tool_result`'s tokens to cut (`COFFER_PROXY_REDUCTION`).
+pub const DEFAULT_REDUCTION: f32 = 0.8;
+
+/// Default absolute ceiling on the tokens a rewritten block may keep
+/// (`COFFER_PROXY_MAX_KEPT_TOKENS`, heuristic chars/4 count; 0 disables). Proportional
+/// reduction alone has an unbounded remainder — measured on the eval dump, an input of
+/// ~915k o200k tokens still kept ~183k at the default reduction, defeating the rewrite on
+/// exactly the oversized results that motivate it. The ceiling makes the kept size
+/// scale-invariant: keep = min(raw × (1 − reduction), ceiling). Note the chars/4 search
+/// lands ~33% above its target in real o200k terms on dense JSON, so 4,000 here is ~5.3k
+/// o200k tokens kept.
+pub const DEFAULT_MAX_KEPT_TOKENS: usize = 4_000;
 const MESSAGES_TOOL_RESULT_MARKER: &[u8] = b"tool_result";
 const RESPONSES_CALL_OUTPUT_MARKER: &[u8] = b"_call_output";
 const OLLAMA_TOOL_MARKER: &[u8] = b"\"tool\"";
@@ -43,6 +53,12 @@ pub struct RewriteOptions {
     pub min_compress: usize,
     /// Prepend [`SENTINEL_EXPLAINER`] to every rewritten block (`COFFER_PROXY_EXPLAIN`).
     pub explain: bool,
+    /// Fraction of a block's tokens to cut (see [`DEFAULT_REDUCTION`]). Non-finite or
+    /// out-of-range values fall back to the default.
+    pub reduction: f32,
+    /// Absolute ceiling on kept tokens per block, heuristic count; 0 disables (see
+    /// [`DEFAULT_MAX_KEPT_TOKENS`]).
+    pub max_kept_tokens: usize,
 }
 
 impl From<usize> for RewriteOptions {
@@ -50,6 +66,8 @@ impl From<usize> for RewriteOptions {
         Self {
             min_compress,
             explain: true,
+            reduction: DEFAULT_REDUCTION,
+            max_kept_tokens: DEFAULT_MAX_KEPT_TOKENS,
         }
     }
 }
@@ -296,8 +314,21 @@ fn squash(
     if text.len() < opts.min_compress {
         return false;
     }
+    // Hybrid budget: proportional cut with an absolute ceiling, so the kept size cannot
+    // scale with the input (a 915k-token block would otherwise still keep ~183k at 0.8).
+    let reduction = if opts.reduction.is_finite() && (0.0..1.0).contains(&opts.reduction) {
+        opts.reduction
+    } else {
+        DEFAULT_REDUCTION
+    };
+    let raw_tokens = counter.count(text);
+    let mut target = (raw_tokens as f32 * (1.0 - reduction)) as usize;
+    if opts.max_kept_tokens > 0 {
+        target = target.min(opts.max_kept_tokens);
+    }
+    let target = target.max(1);
     let Ok(doc) = Compressor::new()
-        .budget(Budget::Reduction(REDUCTION))
+        .budget(Budget::Tokens(target))
         .counter(counter)
         .min_bytes(0)
         .compress(text.as_bytes(), cas)
@@ -379,6 +410,8 @@ mod tests {
             RewriteOptions {
                 min_compress: 1024,
                 explain: false,
+                reduction: DEFAULT_REDUCTION,
+                max_kept_tokens: DEFAULT_MAX_KEPT_TOKENS,
             },
         ));
         assert!(
@@ -390,6 +423,82 @@ mod tests {
             on.strip_prefix(SENTINEL_EXPLAINER).unwrap(),
             off,
             "the explainer is a pure prefix — the render is identical either way"
+        );
+    }
+
+    #[test]
+    fn absolute_ceiling_bounds_kept_tokens_on_huge_blocks() {
+        // Proportional reduction alone keeps 20% of ANY input — unbounded. The ceiling
+        // must make the kept size scale-invariant.
+        let cas = MemoryCas::new();
+        let huge: String = {
+            let items: Vec<String> = (0..4000)
+                .map(|i| format!(r#"{{"id":{i},"sub":"drivers"}}"#))
+                .collect();
+            format!("[{}]", items.join(","))
+        };
+        let counter = HeuristicCounter;
+        let raw_tokens = counter.count(&huge);
+        assert!(raw_tokens > 20_000, "fixture must dwarf the ceiling");
+
+        let out = compress_request_body(
+            &request_with_tool_result(&huge),
+            &cas,
+            RewriteOptions {
+                min_compress: 1024,
+                explain: false,
+                reduction: DEFAULT_REDUCTION,
+                max_kept_tokens: 500,
+            },
+        );
+        let kept = counter.count(&tool_result_text(&out));
+        assert!(
+            kept <= 500,
+            "ceiling must bound the kept size (kept {kept} heuristic tokens)"
+        );
+    }
+
+    #[test]
+    fn proportional_cut_governs_when_under_the_ceiling() {
+        // Mid-size input: raw*0.2 is far below the default ceiling, so the proportional
+        // target applies — today's behavior for modest blocks is unchanged.
+        let cas = MemoryCas::new();
+        let big = big_json_array();
+        let counter = HeuristicCounter;
+        let raw_tokens = counter.count(&big);
+        assert!(raw_tokens / 5 < DEFAULT_MAX_KEPT_TOKENS);
+
+        let out = compress_request_body(&request_with_tool_result(&big), &cas, 1024);
+        let rendered = tool_result_text(&out);
+        let rendered = strip_explainer(&rendered);
+        let kept = counter.count(rendered);
+        assert!(
+            kept <= raw_tokens / 4 && kept > 0,
+            "expected ~20% of {raw_tokens}, kept {kept}"
+        );
+    }
+
+    #[test]
+    fn reduction_knob_changes_kept_size() {
+        let big = big_json_array();
+        let counter = HeuristicCounter;
+        let kept_at = |reduction: f32| {
+            let cas = MemoryCas::new();
+            let out = compress_request_body(
+                &request_with_tool_result(&big),
+                &cas,
+                RewriteOptions {
+                    min_compress: 1024,
+                    explain: false,
+                    reduction,
+                    max_kept_tokens: 0, // ceiling off: isolate the knob under test
+                },
+            );
+            counter.count(&tool_result_text(&out))
+        };
+        assert!(
+            kept_at(0.5) > kept_at(0.95),
+            "a gentler reduction must keep more"
         );
     }
 

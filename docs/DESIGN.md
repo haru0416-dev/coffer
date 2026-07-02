@@ -153,7 +153,11 @@ side is recoverable on the other.
   is already compact round-trips byte-for-byte, while a pretty-printed or `\u`-escaped sender is normalized
   to compact form (semantically identical, not byte-identical). When nothing compresses, the original bytes
   are forwarded verbatim. The transform is **fail-open**: any unexpected body shape or error forwards the
-  original bytes unchanged. Every rewritten block leads with a one-line **sentinel explainer** — the model
+  original bytes unchanged. The per-block budget is a **hybrid**: cut a fraction of the block's tokens
+  (`COFFER_PROXY_REDUCTION`, default 0.8) but never keep more than an absolute ceiling
+  (`COFFER_PROXY_MAX_KEPT_TOKENS`, default 4000 heuristic tokens; 0 disables) — proportional reduction
+  alone has an unbounded remainder (a ~915k-token block would still keep ~183k at 0.8), so the ceiling
+  makes the kept size scale-invariant on exactly the oversized results that motivate the rewrite. Every rewritten block leads with a one-line **sentinel explainer** — the model
   only ever learns about coffer in-band, inside tool output, so this line is what keeps a `<<cof:…>>`
   marker from reading as truncation or corruption: it states that elided bytes are preserved and
   recoverable, how to query them exactly when coffer tools are registered, and that elided content must

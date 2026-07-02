@@ -33,6 +33,12 @@ Then point a compatible client at it:
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8788"
 ```
 
+Tuning: `COFFER_PROXY_REDUCTION` (fraction of each block's tokens to cut, default `0.8`) and
+`COFFER_PROXY_MAX_KEPT_TOKENS` (absolute per-block ceiling on kept tokens, heuristic count,
+default `4000`, `0` disables) — the effective keep is `min(raw × (1 − reduction), ceiling)`.
+`COFFER_PROXY_EXPLAIN=0` drops the in-band sentinel explainer. Both budget knobs are echoed
+back by `/_coffer/health` and `/_coffer/metrics` for verification.
+
 The proxy refuses a non-loopback bind unless `COFFER_PROXY_ALLOW_PUBLIC=1` is
 set. If you use that override, put the proxy behind your own authentication and
 transport security.
